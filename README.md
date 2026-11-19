@@ -49,7 +49,7 @@ claude plugin marketplace add stvlynn/design-flow
 claude plugin install design-flow@design-flow
 ```
 
-The plugin adds a prompt hook (unread comments and approvals are attached to your next message) and a monitor that streams them into the session.
+The plugin adds a prompt hook (unread comments and approvals are attached to your next message) and a monitor that streams them into the session. It loads in the next session, or after `/reload-plugins`. Plugin monitors need a recent Claude Code; on older versions the prompt hook still delivers comments.
 
 ## Use it
 
@@ -61,11 +61,13 @@ The skill triggers on its own when you ask for something with screens or steps, 
 Build sign-up and sign-in for the app. Draw the UX flow first.
 ```
 
-In Claude Code you can also call it by name:
+In Claude Code you can also call it by name, at the start of your message:
 
 ```text
 /design-flow sign-up and sign-in, including every error path
 ```
+
+Installed as a plugin, the same skill is also available as `/design-flow:design-flow`.
 
 The agent picks a feature name, runs `design-flow open sign-up`, and writes `.design-flow/sign-up/flow.yaml`. Your browser opens the canvas at `http://127.0.0.1:27420/…`.
 

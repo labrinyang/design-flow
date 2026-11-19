@@ -172,7 +172,7 @@ edges:
   - { from: L02, to: X03, label: 5th wrong try, kind: error }
   - { from: X01, to: L01, label: Sign in }
   - { from: X03, to: L03, label: Reset }
-  - { from: L04, to: L01, label: Back, kind: back }
+  - { from: L04, to: L01, kind: back }
 
 notes:
   - Apple sign-in skips the code and password steps and lands on S04.
