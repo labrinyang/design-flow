@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/canvas.jpg" alt="The Design Flow canvas for a sign-up and sign-in flow: three lanes (Sign up, Sign in, Errors and interruptions), thirteen phone-sized screens drawn in the app's own style, and labelled arrows between them" width="960" />
+  <img src="docs/images/canvas.png" alt="The Design Flow canvas for a sign-up and sign-in flow: three lanes (Sign up, Sign in, Errors and interruptions), thirteen phone-sized screens drawn in the app's own style, and labelled arrows between them" width="960" />
 </p>
 
 Ask an agent to build a sign-up flow and it starts writing components. The branches it forgot (email already taken, code expired, five wrong passwords, offline) turn up in review, after the code exists.
@@ -72,7 +72,7 @@ The agent picks a feature name, runs `design-flow open sign-up`, and writes `.de
 ### 2. Read the canvas
 
 <p align="center">
-  <img src="docs/images/frames.jpg" alt="Close-up of the Sign in lane: Welcome, Sign in, Wrong password, Reset password and Link sent screens, each a real interface, connected by labelled arrows such as Forgot password and Sent link" width="960" />
+  <img src="docs/images/frames.png" alt="Close-up of the Sign in lane: Welcome, Sign in, Wrong password, Reset password and Link sent screens, each a real interface, connected by labelled arrows such as Forgot password and Sent link" width="960" />
 </p>
 
 - **Lanes** group the flow (sign up, sign in, errors). An error lane marked "reachable from any step" holds interruptions that can happen anywhere.
@@ -87,7 +87,7 @@ Scroll to pan, ⌘-scroll to zoom. Drag a frame to move it; Design Flow remember
 Press <kbd>C</kbd> and click: a button inside a screen, a screen's title, an arrow, a lane or empty canvas.
 
 <p align="center">
-  <img src="docs/images/comment.jpg" alt="A comment pinned to the resend line inside screen S02 Enter code. The comment panel shows the user asking what happens after five wrong codes, and the agent's reply saying the arrow to X02 now reads Expired or 5 wrong" width="960" />
+  <img src="docs/images/comment.png" alt="A comment pinned to the resend line inside screen S02 Enter code. The comment panel shows the user asking what happens after five wrong codes, and the agent's reply saying the arrow to X02 now reads Expired or 5 wrong" width="960" />
 </p>
 
 The agent receives it where it is anchored:
@@ -101,7 +101,7 @@ It changes `flow.yaml`, replies with `design-flow reply`, and resolves the threa
 ### 4. Approve
 
 <p align="center">
-  <img src="docs/images/approve.jpg" alt="The Approve dialog: one comment thread is still open; the agent will be told it can start coding; changing flow.yaml later withdraws the approval" width="960" />
+  <img src="docs/images/approve.png" alt="The Approve dialog: one comment thread is still open; the agent will be told it can start coding; changing flow.yaml later withdraws the approval" width="960" />
 </p>
 
 **Approve** records the exact version of `flow.yaml` you were looking at and tells the agent it may start coding. If the file changes afterwards, the approval is withdrawn and the canvas asks again. The agent does not code the feature until `design-flow status` says `approved`.
@@ -111,13 +111,13 @@ It changes `flow.yaml`, replies with `design-flow reply`, and resolves the threa
 The download button exports the whole canvas as a PNG at 2×, with or without comment pins — for a PR description or a design review.
 
 <p align="center">
-  <img src="docs/images/export-lane.jpg" alt="Part of an exported PNG: the Sign up lane with the Email, Enter code, Create password and Account ready screens" width="960" />
+  <img src="docs/images/export-lane.png" alt="Part of an exported PNG: the Sign up lane with the Email, Enter code, Create password and Account ready screens" width="960" />
 </p>
 
 The canvas follows your system's light or dark mode; screens keep their own colors.
 
 <p align="center">
-  <img src="docs/images/dark.jpg" alt="The same canvas in dark mode" width="960" />
+  <img src="docs/images/dark.png" alt="The same canvas in dark mode" width="960" />
 </p>
 
 ## Commands
