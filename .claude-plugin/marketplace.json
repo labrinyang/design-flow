@@ -1,0 +1,14 @@
+{
+  "name": "design-flow",
+  "description": "Draw every screen of a feature as a UX flow canvas before coding; the user comments and approves in the browser, and comments come back to the session.",
+  "owner": { "name": "Steven Lynn", "email": "i@stv.pm" },
+  "plugins": [
+    {
+      "name": "design-flow",
+      "description": "UX flow canvas before coding: screens as HTML, comments back to the agent, approve to start.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": { "name": "Steven Lynn", "email": "i@stv.pm" }
+    }
+  ]
+}

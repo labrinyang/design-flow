@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.ryugi/
+**/.design-flow/*/.last-valid.yaml
+**/.design-flow/*/*.lock
+.claude/
+**/.design-flow/*/comments.json
+**/.design-flow/*/layout.json
+**/.design-flow/*/approval.json

@@ -1,0 +1,470 @@
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { extname, join, resolve } from "node:path";
+import { WebSocketServer, type WebSocket } from "ws";
+import { approvalStatus, approve, hashFlow, takeApprovalEvent } from "../core/approval.ts";
+import { CommentStore, describeAnchor, isOrphan, type Anchor, type Locale } from "../core/comments.ts";
+import { parseFlow, type Flow, type Issue } from "../core/flow.ts";
+import { layoutFlow, type Overrides } from "../core/layout.ts";
+import schema from "../../schema/flow.v1.json" with { type: "json" };
+
+export const VERSION = "0.1.0";
+export const DEFAULT_PORT = 27420;
+const FEATURE_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+export interface Server {
+  port: number;
+  close(): Promise<void>;
+}
+export interface ServerOptions {
+  port?: number;
+  home: string;
+  webRoot?: string;
+  locale?: Locale;
+}
+
+interface Project {
+  key: string;
+  dir: string;
+  watcher?: FSWatcher;
+  lastValid: Map<string, Flow>;
+}
+
+/** Replace each `file:` screen with its HTML; a missing file becomes an issue. */
+function inlineScreens(flow: Flow | undefined, dir: string, flowFile: string, issues: Issue[]): Flow | undefined {
+  if (!flow) return flow;
+  return {
+    ...flow,
+    screens: flow.screens.map((s) => {
+      if (!s.file) return s;
+      const path = resolve(dir, s.file);
+      if (!path.startsWith(resolve(dir) + "/") || !existsSync(path)) {
+        issues.push({ file: flowFile, line: 1, col: 1, message: `screen ${s.id}: file ${s.file} not found`, hint: "Paths are relative to the feature directory." });
+        return { ...s, html: "" };
+      }
+      return { ...s, html: readFileSync(path, "utf8") };
+    }),
+  };
+}
+
+export const projectKey = (dir: string) => createHash("sha1").update(resolve(dir)).digest("hex").slice(0, 10);
+function validAnchor(a: unknown): a is Anchor {
+  if (!a || typeof a !== "object") return false;
+  const x = a as Record<string, unknown>;
+  const pt = x.point as Record<string, unknown> | undefined;
+  if (!pt || typeof pt.x !== "number" || typeof pt.y !== "number" || !isFinite(pt.x) || !isFinite(pt.y)) return false;
+  const str = (v: unknown) => typeof v === "string" && v.length > 0 && v.length < 200;
+  switch (x.type) {
+    case "element":
+      return str(x.screen) && typeof x.selector === "string" && x.selector.length > 0 && x.selector.length < 500 && typeof x.tag === "string" && typeof x.text === "string" && x.text.length < 500;
+    case "screen":
+      return str(x.screen);
+    case "edge": {
+      const e = x.edge as Record<string, unknown> | undefined;
+      return !!e && str(e.from) && str(e.to) && (e.index === undefined || Number.isInteger(e.index));
+    }
+    case "lane":
+      return str(x.lane);
+    case "canvas":
+      return x.near === undefined || str(x.near);
+    default:
+      return false;
+  }
+}
+
+const featuresRoot = (p: Project) => join(p.dir, ".design-flow");
+const featureDir = (p: Project, f: string) => join(featuresRoot(p), f);
+
+class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function readJson<T>(file: string, fallback: T): T {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function body(req: IncomingMessage): Promise<any> {
+  if (!String(req.headers["content-type"] ?? "").startsWith("application/json"))
+    throw new HttpError(415, "requests with a body must be application/json");
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  const text = Buffer.concat(chunks).toString("utf8");
+  return text ? JSON.parse(text) : {};
+}
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".woff2": "font/woff2",
+  ".json": "application/json",
+};
+
+async function listen(server: ReturnType<typeof createServer>, port: number): Promise<number> {
+  for (let p = port, tries = 0; tries < 20; tries++, p = port === 0 ? 0 : p + 1) {
+    const ok = await new Promise<boolean>((res, rej) => {
+      const onErr = (e: NodeJS.ErrnoException) => {
+        server.off("listening", onOk);
+        if (e.code === "EADDRINUSE") res(false);
+        else rej(e);
+      };
+      const onOk = () => {
+        server.off("error", onErr);
+        res(true);
+      };
+      server.once("error", onErr);
+      server.once("listening", onOk);
+      server.listen(p, "127.0.0.1");
+    });
+    if (ok) return (server.address() as { port: number }).port;
+  }
+  throw new Error(`no free port from ${port}`);
+}
+
+export async function startServer(opts: ServerOptions): Promise<Server> {
+  const home = opts.home;
+  mkdirSync(home, { recursive: true });
+  const locale = opts.locale ?? "en";
+  const projects = new Map<string, Project>();
+  const featureSockets = new Map<string, Set<WebSocket>>(); // `${key}/${feature}`
+  const eventSockets = new Map<string, Set<WebSocket>>(); // key
+  const debounce = new Map<string, NodeJS.Timeout>();
+
+  const persist = () =>
+    writeFileSync(join(home, "projects.json"), JSON.stringify([...projects.values()].map((p) => p.dir), null, 2));
+
+  function featureNames(p: Project): string[] {
+    const root = featuresRoot(p);
+    if (!existsSync(root)) return [];
+    return readdirSync(root)
+      .filter((n) => FEATURE_RE.test(n) && existsSync(join(root, n, "flow.yaml")))
+      .sort();
+  }
+
+  function checkFeature(p: Project, f: string) {
+    if (!FEATURE_RE.test(f)) throw new HttpError(400, `invalid feature name "${f}"`);
+    const dir = featureDir(p, f);
+    if (!existsSync(join(dir, "flow.yaml"))) throw new HttpError(404, `no flow.yaml for feature "${f}"`);
+    return dir;
+  }
+
+  async function state(p: Project, f: string) {
+    const dir = checkFeature(p, f);
+    const file = join(dir, "flow.yaml");
+    const text = readFileSync(file, "utf8");
+    const parsed = parseFlow(text, file);
+    const lastFile = join(dir, ".last-valid.yaml");
+    if (parsed.flow) {
+      p.lastValid.set(f, parsed.flow);
+      if (!existsSync(lastFile) || readFileSync(lastFile, "utf8") !== text) writeFileSync(lastFile, text);
+    } else if (!p.lastValid.has(f) && existsSync(lastFile)) {
+      const prev = parseFlow(readFileSync(lastFile, "utf8"), lastFile).flow;
+      if (prev) p.lastValid.set(f, prev);
+    }
+    const issues: Issue[] = [...parsed.issues];
+    const flow = inlineScreens(parsed.flow ?? p.lastValid.get(f), dir, file, issues);
+    const overrides = readJson<Overrides>(join(dir, "layout.json"), {});
+    const layout = flow ? await layoutFlow(flow, overrides) : undefined;
+    const threads = CommentStore.load(dir).threads.map((t) => ({
+      ...t,
+      where: flow ? describeAnchor(t.anchor, flow, locale) : "",
+      orphan: flow ? isOrphan(t.anchor, flow) : false,
+    }));
+    return {
+      project: p.key,
+      feature: f,
+      flow,
+      layout,
+      issues,
+      sha256: hashFlow(text),
+      threads,
+      status: approvalStatus(dir),
+    };
+  }
+
+  const send = (ws: WebSocket, m: unknown) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(m));
+
+  async function pushState(p: Project, f: string) {
+    const socks = featureSockets.get(`${p.key}/${f}`);
+    if (!socks?.size) return;
+    try {
+      const s = await state(p, f);
+      for (const ws of socks) send(ws, { type: "state", state: s });
+    } catch {
+      /* feature removed */
+    }
+  }
+
+  /** Hand undelivered user messages and approvals to the first connected agent socket. */
+  function deliver(p: Project) {
+    const socks = [...(eventSockets.get(p.key) ?? [])].filter((s) => s.readyState === s.OPEN);
+    if (!socks.length) return;
+    for (const f of featureNames(p)) {
+      const dir = featureDir(p, f);
+      const flow = p.lastValid.get(f) ?? parseFlow(readFileSync(join(dir, "flow.yaml"), "utf8"), "").flow;
+      for (const d of CommentStore.load(dir).takeUndelivered())
+        for (const ws of socks)
+          send(ws, {
+            type: "comment",
+            feature: f,
+            thread: d.threadId,
+            first: d.first,
+            text: d.text,
+            where: flow ? describeAnchor(d.anchor, flow, locale) : "",
+          });
+      const a = takeApprovalEvent(dir);
+      if (a) for (const ws of socks) send(ws, { type: "approved", feature: f, sha256: a.sha256, at: a.at });
+    }
+  }
+
+  function onChange(p: Project, f: string) {
+    const k = `${p.key}/${f}`;
+    clearTimeout(debounce.get(k));
+    debounce.set(
+      k,
+      setTimeout(() => {
+        debounce.delete(k);
+        void pushState(p, f);
+        deliver(p);
+      }, 80),
+    );
+  }
+
+  function register(dir: string): Project {
+    const abs = resolve(dir);
+    if (!existsSync(abs) || !statSync(abs).isDirectory()) throw new HttpError(400, `not a directory: ${abs}`);
+    const key = projectKey(abs);
+    let p = projects.get(key);
+    if (p) return p;
+    p = { key, dir: abs, lastValid: new Map() };
+    mkdirSync(featuresRoot(p), { recursive: true });
+    const proj = p;
+    p.watcher = watch(featuresRoot(p), { recursive: true }, (_e, name) => {
+      const f = String(name ?? "").split(/[\\/]/)[0];
+      if (FEATURE_RE.test(f)) onChange(proj, f);
+    });
+    projects.set(key, p);
+    persist();
+    return p;
+  }
+
+  for (const dir of readJson<string[]>(join(home, "projects.json"), []))
+    try {
+      register(dir);
+    } catch {
+      /* project gone */
+    }
+
+  const getProject = (key: string) => {
+    const p = projects.get(key);
+    if (!p) throw new HttpError(404, `unknown project ${key}`);
+    return p;
+  };
+
+  async function api(req: IncomingMessage, res: ServerResponse, parts: string[]) {
+    const reply = (status: number, data: unknown) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(data));
+    };
+    const m = req.method ?? "GET";
+    // /api/projects
+    if (parts.length === 1 && parts[0] === "projects") {
+      if (m === "POST") {
+        const p = register((await body(req)).dir);
+        return reply(200, { key: p.key, dir: p.dir });
+      }
+      return reply(
+        200,
+        [...projects.values()].map((p) => ({
+          key: p.key,
+          dir: p.dir,
+          features: featureNames(p).map((name) => ({ name, ...approvalStatus(featureDir(p, name)) })),
+        })),
+      );
+    }
+    if (parts[0] !== "projects" || !parts[1]) throw new HttpError(404, "not found");
+    const p = getProject(parts[1]);
+    if (parts.length === 2)
+      return reply(200, {
+        key: p.key,
+        dir: p.dir,
+        features: featureNames(p).map((name) => ({ name, ...approvalStatus(featureDir(p, name)) })),
+      });
+    if (parts[2] !== "features" || !parts[3]) throw new HttpError(404, "not found");
+    const f = parts[3];
+    const dir = checkFeature(p, f);
+    const action = parts[4];
+    if (!action && m === "GET") return reply(200, await state(p, f));
+    if (action === "layout" && m === "POST") {
+      const moved = (await body(req)) as Record<string, { x: unknown; y: unknown }>;
+      const clean: Overrides = {};
+      for (const [id, pos] of Object.entries(moved ?? {}))
+        if (typeof pos?.x === "number" && typeof pos?.y === "number" && isFinite(pos.x) && isFinite(pos.y)) clean[id] = { x: pos.x, y: pos.y };
+      const cur = readJson<Overrides>(join(dir, "layout.json"), {});
+      writeFileSync(join(dir, "layout.json"), JSON.stringify({ ...cur, ...clean }, null, 2));
+    } else if (action === "layout" && m === "DELETE") {
+      writeFileSync(join(dir, "layout.json"), "{}\n");
+    } else if (action === "approve" && m === "POST") {
+      const b = (await body(req)) as { sha256?: string };
+      const text = readFileSync(join(dir, "flow.yaml"), "utf8");
+      if (!b.sha256 || b.sha256 !== hashFlow(text))
+        throw new HttpError(409, "flow.yaml changed since the canvas was drawn; review the new version and approve again");
+      if (parseFlow(text, "").issues.length) throw new HttpError(409, "flow.yaml has problems; it cannot be approved until check is clean");
+      approve(dir);
+    } else if (action === "comments" && m === "POST") {
+      const b = (await body(req)) as { anchor: unknown; text: unknown };
+      if (typeof b.text !== "string" || !b.text.trim()) throw new HttpError(400, "empty comment");
+      if (!validAnchor(b.anchor)) throw new HttpError(400, "invalid comment anchor");
+      CommentStore.load(dir).addThread(b.anchor, b.text.trim());
+    } else if (action === "threads" && parts[5] && m === "POST") {
+      const op = parts[6];
+      const b = op === "reply" ? await body(req) : {};
+      const s = CommentStore.load(dir);
+      try {
+        if (op === "reply") s.reply(parts[5], b.author === "agent" ? "agent" : "user", String(b.text ?? ""));
+        else if (op === "resolve") s.resolve(parts[5]);
+        else if (op === "reopen") s.reopen(parts[5]);
+        else throw new HttpError(404, "not found");
+      } catch (e) {
+        if (e instanceof HttpError) throw e;
+        throw new HttpError(404, (e as Error).message);
+      }
+    } else throw new HttpError(404, "not found");
+    onChange(p, f);
+    return reply(200, await state(p, f));
+  }
+
+  const webRoot = opts.webRoot;
+  function serveStatic(url: string, res: ServerResponse) {
+    if (!webRoot) {
+      res.writeHead(404).end("web app not built");
+      return;
+    }
+    let file = resolve(webRoot, "." + url);
+    if (!file.startsWith(resolve(webRoot)) || !existsSync(file) || statSync(file).isDirectory())
+      file = join(webRoot, "index.html");
+    res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
+    res.end(readFileSync(file));
+  }
+
+  let port = 0;
+  /** Only the canvas itself (same origin) and local tools without an Origin may talk to the server. */
+  function trusted(req: IncomingMessage): boolean {
+    const host = String(req.headers.host ?? "");
+    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false;
+    const origin = req.headers.origin;
+    return origin === undefined || origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
+  }
+  const fail = (res: ServerResponse, status: number, error: string) => {
+    if (res.headersSent) return res.end();
+    res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ error }));
+  };
+
+  const http = createServer((req, res) => {
+    try {
+      handle(req, res);
+    } catch (e) {
+      fail(res, e instanceof HttpError ? e.status : 500, (e as Error).message);
+    }
+  });
+
+  function handle(req: IncomingMessage, res: ServerResponse) {
+    const url = req.url ?? "/";
+    if (!trusted(req)) return fail(res, 403, "forbidden");
+    let path: string;
+    try {
+      path = decodeURIComponent(url.split("?")[0]);
+    } catch {
+      return fail(res, 400, "malformed URL");
+    }
+    if (url.startsWith("/api/")) {
+      let parts: string[];
+      try {
+        parts = url.split("?")[0].slice(5).split("/").map(decodeURIComponent);
+      } catch {
+        return fail(res, 400, "malformed URL");
+      }
+      api(req, res, parts).catch((e: unknown) => {
+        const status = e instanceof HttpError ? e.status : 500;
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      });
+      return;
+    }
+    if (path === "/health") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, app: "design-flow", version: VERSION }));
+      return;
+    }
+    if (path === "/schema/flow.v1.json") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(schema, null, 2));
+      return;
+    }
+    serveStatic(path, res);
+  }
+
+  const wss = new WebSocketServer({ noServer: true });
+  http.on("upgrade", (req, socket, head) => {
+    if (!trusted(req)) {
+      socket.destroy();
+      return;
+    }
+    let u: URL;
+    try {
+      u = new URL(req.url ?? "/", "http://x");
+    } catch {
+      socket.destroy();
+      return;
+    }
+    const p = projects.get(u.searchParams.get("project") ?? "");
+    if (!p || (u.pathname !== "/ws" && u.pathname !== "/events")) {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      if (u.pathname === "/events") {
+        const set = eventSockets.get(p.key) ?? new Set();
+        set.add(ws);
+        eventSockets.set(p.key, set);
+        ws.on("close", () => set.delete(ws));
+        deliver(p);
+        return;
+      }
+      const f = u.searchParams.get("feature") ?? "";
+      const k = `${p.key}/${f}`;
+      const set = featureSockets.get(k) ?? new Set();
+      set.add(ws);
+      featureSockets.set(k, set);
+      ws.on("close", () => set.delete(ws));
+      state(p, f).then(
+        (s) => send(ws, { type: "state", state: s }),
+        (e: Error) => send(ws, { type: "error", message: e.message }),
+      );
+    });
+  });
+
+  port = await listen(http, opts.port ?? DEFAULT_PORT);
+  writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, version: VERSION }, null, 2));
+
+  return {
+    port,
+    async close() {
+      for (const p of projects.values()) p.watcher?.close();
+      for (const t of debounce.values()) clearTimeout(t);
+      for (const ws of wss.clients) ws.terminate();
+      wss.close();
+      await new Promise<void>((r) => http.close(() => r()));
+    },
+  };
+}

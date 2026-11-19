@@ -1,0 +1,19 @@
+{
+  "name": "design-flow",
+  "description": "Draw a UX flow canvas before coding a feature with screens; the user comments and approves in the browser, and comments come back to the session.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "author": {
+    "name": "Steven Lynn",
+    "email": "i@stv.pm"
+  },
+  "homepage": "https://github.com/stvlynn/design-flow",
+  "repository": "https://github.com/stvlynn/design-flow",
+  "keywords": [
+    "ux",
+    "flow",
+    "canvas",
+    "design",
+    "skills"
+  ]
+}

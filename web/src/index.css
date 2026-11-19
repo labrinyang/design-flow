@@ -1,0 +1,74 @@
+@import "tailwindcss";
+@import "@astrafoundry/design/styles.css";
+@import "@xyflow/react/dist/base.css";
+
+@import "@fontsource/fraunces/400.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/jetbrains-mono/400.css";
+
+@source "./";
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* React Flow chrome follows Sunbeam tokens. */
+.react-flow {
+  --xy-background-color: var(--canvas);
+  --xy-background-pattern-dots-color-default: var(--canvas-dot);
+  --xy-edge-label-background-color: var(--canvas);
+  --xy-selection-background-color: color-mix(in oklab, var(--yellow-500) 10%, transparent);
+  --xy-selection-border: 1px dashed var(--yellow-500);
+}
+.react-flow__node {
+  cursor: default;
+}
+.react-flow__node.draggable {
+  cursor: grab;
+}
+.react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Lane tones: the Sunbeam status colors. Yellow is kept for the primary action. */
+[data-tone="success"] {
+  --tone: var(--success);
+}
+[data-tone="info"] {
+  --tone: var(--info);
+}
+[data-tone="danger"] {
+  --tone: var(--danger);
+}
+[data-tone="neutral"] {
+  --tone: var(--muted-foreground);
+}
+
+[data-commenting="true"] .react-flow__pane,
+[data-commenting="true"] .react-flow__node,
+[data-commenting="true"] .react-flow__edge {
+  cursor: crosshair;
+}
+[data-commenting="true"] [data-anchor]:hover {
+  outline: 2px solid var(--yellow-500);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+:root {
+  --edge-success: var(--success);
+  --edge-info: var(--info);
+  --edge-danger: var(--danger);
+  --edge-neutral: var(--muted-foreground);
+}
