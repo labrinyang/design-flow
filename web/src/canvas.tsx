@@ -1,19 +1,4 @@
-import {
-  AlertDialog,
-  AlertDialogClose,
-  AlertDialogDescription,
-  AlertDialogPopup,
-  AlertDialogTitle,
-  Badge,
-  Button,
-  Checkbox,
-  DialogFooter,
-  IconButton,
-  Popover,
-  PopoverPopup,
-  PopoverTrigger,
-  Toggle,
-} from "@astrafoundry/design/ui";
+import { Button, IconButton } from "@astrafoundry/design/ui";
 import {
   Background,
   BackgroundVariant,
@@ -22,13 +7,14 @@ import {
   ReactFlowProvider,
   useNodesState,
   useReactFlow,
+  useViewport,
   ViewportPortal,
   type EdgeTypes,
   type Node,
   type NodeTypes,
 } from "@xyflow/react";
 import { toPng } from "html-to-image";
-import { ArrowLeft, Download, LayoutGrid, Maximize, MessageSquare, MessageSquarePlus, Minus, Plus } from "lucide-react";
+import { ArrowLeft, Play } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Anchor, Point } from "../../src/core/comments.ts";
 import { describeAnchor } from "../../src/core/comments.ts";
@@ -38,10 +24,14 @@ import { anchorFromFrame, anchorFromTarget, exportBounds } from "./anchor.ts";
 import { snapshotImageStyle, snapshotSvg, viewportOf } from "./screen-doc.ts";
 import { api, useFeature, type FeatureState } from "./api.ts";
 import { CommentPanel, NewComment } from "./comments.tsx";
+import { markOf, placeDraft } from "./draft.ts";
 import { FlowEdgeView } from "./edges.tsx";
 import { locale, t } from "./i18n.ts";
 import { legendOf, toReactFlow } from "./model.ts";
-import { frameEvents, LaneNodeView, ScreenNodeView, type FrameClick } from "./nodes.tsx";
+import { frameEvents, highlightInFrame, LaneNodeView, ScreenNodeView, type FrameClick } from "./nodes.tsx";
+import { Toolbar } from "./toolbar.tsx";
+import { Play as PlayView } from "./play.tsx";
+import { ShareMenu } from "./share.tsx";
 
 function NotesNode({ data }: { data: { notes: string[] } }) {
   return (
@@ -58,7 +48,6 @@ function NotesNode({ data }: { data: { notes: string[] } }) {
 
 const nodeTypes: NodeTypes = { screen: ScreenNodeView, lane: LaneNodeView, notes: NotesNode };
 const edgeTypes: EdgeTypes = { flow: FlowEdgeView };
-const STATUS_TONE = { draft: "neutral", approved: "success", stale: "danger" } as const;
 
 export function Legend({ flow }: { flow: Flow }) {
   const items = legendOf(flow);
@@ -123,11 +112,8 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   const [commenting, setCommenting] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [activeThread, setActiveThread] = useState<string>();
-  const [draft, setDraft] = useState<{ anchor: Anchor; screen: { x: number; y: number } }>();
-  const [withComments, setWithComments] = useState(false);
-  const [approving, setApproving] = useState(false);
-  const [approveError, setApproveError] = useState<string>();
-  useEffect(() => setApproveError(undefined), [approving, state?.sha256]);
+  const [draft, setDraft] = useState<{ anchor: Anchor }>();
+  const [playing, setPlaying] = useState(false);
   const fitted = useRef(false);
 
   const graph = useMemo(() => (state?.flow && state.layout ? toReactFlow(state.flow, state.layout) : undefined), [state]);
@@ -146,10 +132,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       const screen = state.flow.screens.find((x) => x.id === click.screen);
       const box = state.layout.screens[click.screen];
       if (!screen || !box) return;
-      const anchor = anchorFromFrame(click, box, viewportOf(state.flow, screen).width);
-      const at = rf.flowToScreenPosition(anchor.point);
-      const host = document.querySelector("main")!.getBoundingClientRect();
-      setDraft({ anchor, screen: { x: at.x - host.left, y: at.y - host.top } });
+      setDraft({ anchor: anchorFromFrame(click, box, viewportOf(state.flow, screen).width) });
     };
     frameEvents.addEventListener("comment", onFrame);
     return () => frameEvents.removeEventListener("comment", onFrame);
@@ -190,17 +173,32 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     (e: React.MouseEvent) => {
       if (!commenting || !state?.layout || !state.flow) return;
       const target = e.target as HTMLElement;
-      if (target.closest("[data-pin], [data-draft], [data-comment-panel], .react-flow__panel")) return;
+      if (target.closest("[data-pin], [data-draft], [data-comment-panel], [data-toolbar], .react-flow__panel")) return;
       const point: Point = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
       const anchor = anchorFromTarget(target, { x: Math.round(point.x), y: Math.round(point.y) }, state.layout.screens);
-      const host = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      setDraft({ anchor, screen: { x: e.clientX - host.left, y: e.clientY - host.top } });
+      setDraft({ anchor });
       e.stopPropagation();
     },
     [commenting, state, rf],
   );
 
-  const exportPng = useCallback(async () => {
+  // What the comment being written points at: ring it on the canvas until the draft closes.
+  const mark = useMemo(() => (draft && state?.flow ? markOf(draft.anchor, state.flow) : {}), [draft, state?.flow]);
+  useEffect(() => {
+    highlightInFrame(mark.selector ? mark.screen : undefined, mark.selector);
+    setNodes((ns) =>
+      ns.map((n) => {
+        const on = (n.type === "screen" && !mark.selector && n.id === mark.screen) || (n.type === "lane" && n.id === `lane:${mark.lane}`);
+        return n.className === (on ? "df-marked" : undefined) ? n : { ...n, className: on ? "df-marked" : undefined };
+      }),
+    );
+  }, [mark, nodes.length, setNodes]);
+  const edges = useMemo(
+    () => graph?.edges.map((e) => (e.id === mark.edge ? { ...e, data: { ...e.data!, marked: true } } : e)),
+    [graph, mark.edge],
+  );
+
+  const exportPng = useCallback(async (withComments: boolean) => {
     const viewport = document.querySelector<HTMLElement>(".react-flow__viewport");
     if (!viewport) return;
     const nodeBoxes = getNodesBounds(rf.getNodes());
@@ -222,12 +220,11 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     a.href = url;
     a.download = `${feature}.png`;
     a.click();
-  }, [rf, feature, withComments, state]);
+  }, [rf, feature, state]);
 
   if (error) return <div className="p-10 text-muted-foreground">{error}</div>;
   if (!state) return null;
-  const { flow, layout, status, issues } = state;
-  const openCount = state.threads.filter((x) => x.status === "open").length;
+  const { flow, layout, issues } = state;
 
   return (
     <div className="flex h-full flex-col">
@@ -239,84 +236,22 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           <h1 className="truncate font-display text-[22px] leading-tight">{flow?.title ?? feature}</h1>
           {flow?.subtitle && <p className="truncate text-[13px] text-muted-foreground">{flow.subtitle}</p>}
         </div>
-        <Badge tone={STATUS_TONE[status.status]} className="shrink-0">
-          {status.status === "draft" ? t.waiting : t.status[status.status]}
-        </Badge>
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           {flow && <Legend flow={flow} />}
-          <span className="mx-1 h-5 w-px bg-border" />
-          <IconButton label={t.zoomOut} size="sm" onClick={() => rf.zoomOut()}>
-            <Minus size={16} />
-          </IconButton>
-          <IconButton label={t.zoomIn} size="sm" onClick={() => rf.zoomIn()}>
-            <Plus size={16} />
-          </IconButton>
-          <IconButton label={t.fit} size="sm" onClick={() => rf.fitView({ padding: 0.06, duration: 200 })}>
-            <Maximize size={15} />
-          </IconButton>
-          <IconButton label={t.relayout} size="sm" onClick={() => void api.clearLayout(project, feature).then(setState)}>
-            <LayoutGrid size={15} />
-          </IconButton>
-          <Popover>
-            <PopoverTrigger render={<IconButton label={t.exportPng} size="sm" />}>
-              <Download size={15} />
-            </PopoverTrigger>
-            <PopoverPopup className="w-60 space-y-3">
-              <label className="flex items-center gap-2 text-[14px]">
-                <Checkbox checked={withComments} onCheckedChange={(v) => setWithComments(v === true)} />
-                {t.exportWithComments}
-              </label>
-              <Button size="sm" variant="secondary" className="w-full" onClick={() => void exportPng()}>
-                {t.exportPng}
+          {flow && (
+            <>
+              <span className="mx-1 h-5 w-px bg-border" />
+              <Button size="sm" variant="secondary" onClick={() => setPlaying(true)}>
+                <Play size={14} fill="currentColor" />
+                {t.play}
               </Button>
-            </PopoverPopup>
-          </Popover>
-          <span className="mx-1 h-5 w-px bg-border" />
-          <Toggle
-            aria-label={t.comment}
-            pressed={commenting}
-            onPressedChange={setCommenting}
-            size="sm"
-            title={`${t.comment} (C)`}
-          >
-            <MessageSquarePlus size={15} />
-          </Toggle>
-          <Button size="sm" variant="secondary" onClick={() => setPanelOpen((v) => !v)}>
-            <MessageSquare size={15} />
-            <span className="tabular-nums">{openCount}</span>
-          </Button>
-          <Button size="sm" variant="primary" disabled={!flow || issues.length > 0 || status.status === "approved"} onClick={() => setApproving(true)}>
-            {t.approve}
-          </Button>
-          <AlertDialog open={approving} onOpenChange={setApproving}>
-            <AlertDialogPopup>
-              <AlertDialogTitle>{t.approveTitle}</AlertDialogTitle>
-              <AlertDialogDescription>{t.approveBody(openCount)}</AlertDialogDescription>
-              {approveError && (
-                <p role="alert" className="text-[14px]" style={{ color: "var(--danger)" }}>
-                  {t.approveChanged}
-                </p>
-              )}
-              <DialogFooter>
-                <AlertDialogClose render={<Button variant="secondary" />}>{t.cancel}</AlertDialogClose>
-                <Button variant="primary" onClick={() => void api.approve(project, feature, state.sha256).then(
-                      (st) => {
-                        setState(st);
-                        setApproving(false);
-                      },
-                      (e: Error) => {
-                        setApproveError(e.message);
-                      },
-                    )}>
-                  {t.approve}
-                </Button>
-              </DialogFooter>
-            </AlertDialogPopup>
-          </AlertDialog>
+              <ShareMenu project={project} feature={feature} onExportPng={(pins) => void exportPng(pins)} />
+            </>
+          )}
         </div>
       </header>
+      {playing && flow && <PlayView flow={flow} prototype={state.prototype} start={startScreen(flow)} onClose={() => setPlaying(false)} />}
       {!connected && <div className="bg-accent px-4 py-1.5 text-[13px] text-accent-foreground">{t.disconnected}</div>}
-      {commenting && <div className="bg-accent px-4 py-1.5 text-[13px] text-accent-foreground">{t.commentHint}</div>}
       {issues.length > 0 && (
         <div role="alert" className="border-b border-border bg-card px-4 py-2 text-[13px]">
           <p className="font-medium" style={{ color: "var(--danger)" }}>
@@ -335,7 +270,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         {graph && flow && layout && (
           <ReactFlow
             nodes={nodes}
-            edges={graph.edges}
+            edges={edges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
@@ -362,23 +297,32 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           </ReactFlow>
         )}
         {draft && flow && (
-          <div data-draft className="absolute z-20" style={{ left: Math.min(draft.screen.x, innerWidth - 300), top: draft.screen.y }}>
+          <DraftAt point={draft.anchor.point}>
             <NewComment
               where={describeAnchor(draft.anchor, flow, locale)}
               onCancel={() => setDraft(undefined)}
               onSubmit={(text) =>
-                void api.comment(project, feature, draft.anchor, text).then((s) => {
+                api.comment(project, feature, draft.anchor, text).then((s) => {
                   setState(s);
                   setDraft(undefined);
                   setPanelOpen(true);
                 })
               }
             />
-          </div>
+          </DraftAt>
         )}
+        <Toolbar
+          state={state}
+          commenting={commenting}
+          setCommenting={setCommenting}
+          onTogglePanel={() => setPanelOpen((v) => !v)}
+          onRelayout={() => void api.clearLayout(project, feature).then(setState)}
+          onApprove={() => api.approve(project, feature, state.sha256).then(setState)}
+        />
         {panelOpen && (
           <CommentPanel
             state={state}
+            onChange={setState}
             active={activeThread}
             onFocus={(id) => {
               setActiveThread(id);
@@ -391,6 +335,57 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       </main>
     </div>
   );
+}
+
+/**
+ * The new-comment box, kept beside its point as the canvas pans and zooms, with a marker on the point.
+ * Wheel and pinch over the box stay with the box: they neither move the canvas nor zoom the page.
+ */
+function DraftAt({ point, children }: { point: Point; children: React.ReactNode }) {
+  const rf = useReactFlow();
+  useViewport(); // re-render on every pan/zoom
+  const box = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 300, height: 170 });
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setSize({ width: el.offsetWidth, height: el.offsetHeight }));
+    ro.observe(el);
+    // Native listener: React's wheel handler is passive, so it could not stop a pinch from zooming the page.
+    const stop = (e: WheelEvent) => {
+      if (e.ctrlKey) e.preventDefault();
+      e.stopPropagation();
+    };
+    el.addEventListener("wheel", stop, { passive: false });
+    return () => {
+      ro.disconnect();
+      el.removeEventListener("wheel", stop);
+    };
+  }, []);
+  const host = document.querySelector("main")?.getBoundingClientRect();
+  if (!host) return null;
+  const at = rf.flowToScreenPosition(point);
+  const marker = { x: at.x - host.left, y: at.y - host.top };
+  const bar = document.querySelector("[data-toolbar]")?.getBoundingClientRect();
+  const pos = placeDraft(marker, size, { width: host.width, height: host.height }, bar ? host.bottom - bar.top : 0);
+  return (
+    <>
+      <span
+        data-draft-marker
+        className="pointer-events-none absolute z-20 size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-3"
+        style={{ left: marker.x, top: marker.y, background: "var(--yellow-500)" }}
+      />
+      <div ref={box} data-draft className="nowheel absolute z-20" style={{ ...pos, touchAction: "none" }}>
+        {children}
+      </div>
+    </>
+  );
+}
+
+/** Where Play starts: the first entry screen (no lane) nothing leads into, else the first screen. */
+function startScreen(flow: Flow): string {
+  const targets = new Set(flow.edges.map((e) => e.to));
+  return (flow.screens.find((s) => !s.lane && !targets.has(s.id)) ?? flow.screens.find((s) => !targets.has(s.id)) ?? flow.screens[0]).id;
 }
 
 function snapshotFrame(frame: HTMLIFrameElement): Promise<{ html: string; width: number; height: number } | undefined> {

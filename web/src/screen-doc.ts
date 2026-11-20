@@ -1,3 +1,4 @@
+import { CSP } from "../../src/core/play.ts";
 import type { Flow, Screen, Viewport } from "../../src/core/flow.ts";
 
 export const DEFAULT_VIEWPORT: Viewport = { width: 390, height: 844 };
@@ -12,16 +13,18 @@ interface ElementLike {
   getAttribute(name: string): string | null;
 }
 
-const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
-
-/** A stable CSS selector for `el` from the document body: data-id, then id, then an nth-of-type path. */
+/**
+ * A stable CSS selector for `el` from the document body: data-id, then id, then an nth-of-type path.
+ * Self-contained: the frame script embeds its source, where no outer helper exists.
+ */
 export function selectorFor(el: ElementLike, body: ElementLike): string {
+  const esc = (s: string) => s.replace(/["\\]/g, "\\$&");
   const parts: string[] = [];
   let cur: ElementLike | null = el;
   while (cur && cur !== body) {
     const dataId = cur.getAttribute("data-id");
     if (dataId) {
-      parts.unshift(`[data-id="${cssEscape(dataId)}"]`);
+      parts.unshift(`[data-id="${esc(dataId)}"]`);
       break;
     }
     if (cur.id && /^[A-Za-z][\w-]*$/.test(cur.id)) {
@@ -41,15 +44,19 @@ function frameScript(channel: string) {
   const sel = selectorFor.toString();
   return `<script>(function(){
 var channel=${JSON.stringify(channel)};var commenting=false;var hovered=null;
-var cssEscape=${cssEscape.toString()};
 var selectorFor=${sel};
 function send(m){m.channel=channel;parent.postMessage(m,"*");}
 var ring=document.createElement("div");
 ring.style.cssText="position:fixed;pointer-events:none;outline:3px solid #ffcc00;outline-offset:2px;border-radius:4px;z-index:2147483647;display:none";
 document.documentElement.appendChild(ring);
-function mark(el){if(!el||el===document.body||el===document.documentElement){ring.style.display="none";return;}var r=el.getBoundingClientRect();ring.style.display="block";ring.style.left=r.left+"px";ring.style.top=r.top+"px";ring.style.width=r.width+"px";ring.style.height=r.height+"px";}
+var pin=document.createElement("div");
+pin.style.cssText="position:fixed;pointer-events:none;outline:3px solid #ffcc00;outline-offset:2px;background:rgba(255,204,0,.18);border-radius:4px;z-index:2147483646;display:none";
+document.documentElement.appendChild(pin);
+function place(box,el){if(!el||el===document.body||el===document.documentElement){box.style.display="none";return;}var r=el.getBoundingClientRect();box.style.display="block";box.style.left=r.left+"px";box.style.top=r.top+"px";box.style.width=r.width+"px";box.style.height=r.height+"px";}
+function mark(el){place(ring,el);}
 addEventListener("message",function(e){if(e.source!==parent||!e.data||e.data.channel!==channel)return;if(e.data.type==="commenting"){commenting=!!e.data.on;if(!commenting)mark(null);}
-  if(e.data.type==="snapshot"){ring.style.display="none";var n=document.documentElement.cloneNode(true);n.querySelectorAll("body").forEach(function(b){b.style.height=innerHeight+"px";});n.querySelectorAll("script").forEach(function(x){x.remove();});var m=n.querySelector('meta[http-equiv]');if(m)m.remove();send({type:"snapshot",id:e.data.id,html:new XMLSerializer().serializeToString(n),width:innerWidth,height:innerHeight});}});
+  if(e.data.type==="highlight"){var t=null;try{t=e.data.selector?document.querySelector(e.data.selector):null;}catch(_){}place(pin,t);}
+  if(e.data.type==="snapshot"){ring.style.display="none";pin.style.display="none";var n=document.documentElement.cloneNode(true);n.querySelectorAll("body").forEach(function(b){b.style.height=innerHeight+"px";});n.querySelectorAll("script").forEach(function(x){x.remove();});var m=n.querySelector('meta[http-equiv]');if(m)m.remove();send({type:"snapshot",id:e.data.id,html:new XMLSerializer().serializeToString(n),width:innerWidth,height:innerHeight});}});
 document.addEventListener("mousemove",function(e){if(!commenting)return;var el=e.target;if(el!==hovered){hovered=el;mark(el);}},true);
 document.addEventListener("click",function(e){
   var el=e.target;
@@ -64,8 +71,6 @@ send({type:"ready"});
 })();</script>`;
 }
 
-const CSP =
-  "default-src 'none'; img-src data: blob:; media-src data: blob:; style-src 'unsafe-inline'; font-src data:; script-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
 
 /** The full document for one screen's sandboxed frame. */
 export function screenDocument(flow: Flow, screen: Screen, opts: { channel: string }): string {

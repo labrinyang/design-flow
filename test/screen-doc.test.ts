@@ -44,6 +44,15 @@ describe("frameSize", () => {
 });
 
 describe("selectorFor", () => {
+  it("runs from its own source alone, as it does inside a frame after minification", () => {
+    // The frame script embeds selectorFor.toString(); any outer helper it calls is renamed by the minifier and missing there.
+    const standalone = new Function(`return (${selectorFor.toString()})`)() as typeof selectorFor;
+    const body: any = { localName: "body", children: [], parentElement: null, getAttribute: () => null, id: "" };
+    const btn: any = { localName: "button", children: [], parentElement: body, getAttribute: (k: string) => (k === "data-id" ? 'say "hi"' : null), id: "" };
+    body.children.push(btn);
+    expect(standalone(btn, body)).toBe('[data-id="say \\"hi\\""]');
+  });
+
   const doc = new (class {
     body: any;
   })();

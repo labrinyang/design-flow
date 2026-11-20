@@ -22,6 +22,12 @@ if (typeof window !== "undefined")
     if (click) frameEvents.dispatchEvent(new CustomEvent<FrameClick>("comment", { detail: click }));
   });
 
+/** Ring one element inside a screen's frame (or clear every frame's ring with no screen). */
+export function highlightInFrame(screen: string | undefined, selector: string | undefined) {
+  for (const [channel, f] of frames)
+    f.window()?.postMessage({ channel, type: "highlight", selector: f.screen === screen ? (selector ?? null) : null }, "*");
+}
+
 export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
   const { screen, tone, flow, commenting } = data;
   const vp = viewportOf(flow, screen);
@@ -65,6 +71,7 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
       <div
         data-anchor="screen"
         data-screen={screen.id}
+        data-frame
         className="relative h-full overflow-hidden rounded-xl shadow-2 ring-1 ring-border"
         style={{ background: "white" }}
       >

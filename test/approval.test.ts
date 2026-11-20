@@ -24,6 +24,15 @@ describe("approval", () => {
     expect(approvalStatus(dir).status).toBe("stale");
   });
 
+  it("goes stale when prototype.html changes after approval, since it holds the screens", () => {
+    const dir = feature();
+    writeFileSync(join(dir, "prototype.html"), `<section data-screen="A">v1</section>`);
+    approve(dir);
+    expect(approvalStatus(dir).status).toBe("approved");
+    writeFileSync(join(dir, "prototype.html"), `<section data-screen="A">v2</section>`);
+    expect(approvalStatus(dir).status).toBe("stale");
+  });
+
   it("counts open threads", () => {
     const dir = feature();
     const s = CommentStore.load(dir);

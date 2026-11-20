@@ -55,11 +55,35 @@ describe("design-flow CLI", () => {
     expect(bad.out).toMatch(/flow\.yaml:7:\d+ .*"Z"/);
   });
 
+  it("check also validates prototype.html against flow.yaml", async () => {
+    const dir = project(FLOW);
+    writeFileSync(join(dir, ".design-flow", "pay", "prototype.html"), `<section data-screen="A">\n<button data-to="C">Pay</button></section><section data-screen="B"></section>`);
+    const bad = await df(["check", "pay"], dir);
+    expect(bad.code).toBe(3);
+    expect(bad.out).toMatch(/prototype\.html:2:1 data-to in A goes to unknown screen C/);
+  });
+
+  it("open replaces a running server from an older build instead of reusing it", async () => {
+    const dir = project(FLOW);
+    // A stand-in for a server left running from before an update: answers /health without this build's id.
+    const old = spawn(process.execPath, ["-e", `require("http").createServer((q,r)=>r.end(JSON.stringify({ok:true,app:"design-flow",version:"0.1.0"}))).listen(0,"127.0.0.1",function(){console.log(this.address().port)})`], { stdio: ["ignore", "pipe", "ignore"] });
+    const port = Number(await new Promise<string>((r) => old.stdout!.once("data", (d) => r(String(d).trim()))));
+    writeFileSync(join(home, "server.json"), JSON.stringify({ pid: old.pid, port, version: "0.1.0" }));
+    const exited = new Promise((r) => old.once("exit", r));
+    const r = await df(["open", "pay", "--no-open"], dir);
+    expect(r.code, r.err).toBe(0);
+    await exited;
+    const info = JSON.parse(readFileSync(join(home, "server.json"), "utf8"));
+    expect(info.pid).not.toBe(old.pid);
+    expect(r.out).not.toContain(`:${port}/`);
+  });
+
   it("open writes a template, starts the server and prints the URL", async () => {
     const dir = project();
     const r = await df(["open", "signup", "--no-open"], dir);
     expect(r.code, r.err).toBe(0);
     expect(existsSync(join(dir, ".design-flow", "signup", "flow.yaml"))).toBe(true);
+    expect(readFileSync(join(dir, ".design-flow", "signup", "prototype.html"), "utf8")).toContain('data-screen="M01"');
     const url = r.out.match(/http:\/\/127\.0\.0\.1:\d+\/\S+/)?.[0];
     expect(url).toBeTruthy();
     const health = await fetch(new URL("/health", url!));

@@ -23,6 +23,8 @@ export interface EdgeData extends Record<string, unknown> {
   dashed: boolean;
   edge: Edge;
   index: number;
+  /** Set by the canvas while a comment on this edge is being written. */
+  marked?: boolean;
 }
 export type ScreenNode = RFNode<ScreenData, "screen">;
 export type LaneNode = RFNode<LaneData, "lane">;

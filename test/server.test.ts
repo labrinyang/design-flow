@@ -272,4 +272,73 @@ describe("screen html", () => {
     await updated;
     ws.close();
   });
+
+  it("fills screens from prototype.html, one section each, and sends the whole document for Play", async () => {
+    const { base } = await boot();
+    const dir = project();
+    const fd = join(dir, ".design-flow", "demo");
+    writeFileSync(
+      join(fd, "prototype.html"),
+      `<html><head><style>.x{color:red}</style></head><body><section data-screen="A"><button data-to="B">Go</button></section><section data-screen="B"><p>Beta page</p></section></body></html>`,
+    );
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const st = await json(await fetch(`${base}/api/projects/${key}/features/demo`));
+    expect(st.issues).toEqual([]);
+    expect(st.flow.screens[1].html).toBe(`<section data-screen="B"><p>Beta page</p></section>`);
+    expect(st.flow.style).toContain(".x{color:red}");
+    expect(st.prototype).toContain(`<section data-screen="A">`);
+  });
+
+  it("lists prototype.html problems with the flow's issues", async () => {
+    const { base } = await boot();
+    const dir = project();
+    writeFileSync(join(dir, ".design-flow", "demo", "prototype.html"), `<section data-screen="A"><a data-to="Q">x</a></section><section data-screen="B"></section>`);
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const st = await json(await fetch(`${base}/api/projects/${key}/features/demo`));
+    expect(st.issues.map((i: { message: string }) => i.message)).toEqual(["data-to in A goes to unknown screen Q"]);
+  });
+
+  it("downloads the flow as one HTML file", async () => {
+    const { base } = await boot();
+    const dir = project();
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const res = await fetch(`${base}/api/projects/${key}/features/demo/share.html`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    expect(res.headers.get("content-disposition")).toBe('attachment; filename="demo.html"');
+    expect(await res.text()).toContain("<title>Demo</title>");
+  });
+
+  it("publishes the HTML as a secret gist through gh and returns a link that opens it", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "df-gh-"));
+    const log = join(bin, "calls.txt");
+    // A stand-in gh: records its arguments and the file it was given, prints a gist URL.
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\nfor a; do case "$a" in *.html) cp "$a" "${log}.html";; esac; done\necho https://gist.github.com/stv/abc123\n`,
+      { mode: 0o755 },
+    );
+    const home = mkdtempSync(join(tmpdir(), "df-home-"));
+    server = await startServer({ port: 0, home, gh: join(bin, "gh") });
+    const base = `http://127.0.0.1:${server.port}`;
+    const dir = project();
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const r = await json(await post(`${base}/api/projects/${key}/features/demo/share`, {}));
+    expect(r).toEqual({ gist: "https://gist.github.com/stv/abc123", url: "https://gistcdn.githack.com/stv/abc123/raw/demo.html" });
+    const args = readFileSync(log, "utf8").trim().split("\n");
+    expect(args.slice(0, 2)).toEqual(["gist", "create"]);
+    expect(args).not.toContain("--public");
+    expect(readFileSync(`${log}.html`, "utf8")).toContain("<title>Demo</title>");
+  });
+
+  it("says what to do when gh is missing or not signed in", async () => {
+    const home = mkdtempSync(join(tmpdir(), "df-home-"));
+    server = await startServer({ port: 0, home, gh: "/nonexistent/gh" });
+    const base = `http://127.0.0.1:${server.port}`;
+    const dir = project();
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const res = await post(`${base}/api/projects/${key}/features/demo/share`, {});
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/gh auth login/);
+  });
 });

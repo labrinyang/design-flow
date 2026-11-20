@@ -10,9 +10,17 @@ interface Approval {
   delivered?: boolean;
 }
 
-export const hashFlow = (text: string) => createHash("sha256").update(text).digest("hex");
+export const hashFlow = (text: string, prototype?: string) => {
+  const h = createHash("sha256").update(text);
+  if (prototype !== undefined) h.update("\0prototype.html\0").update(prototype);
+  return h.digest("hex");
+};
 
-const flowText = (dir: string) => readFileSync(join(dir, "flow.yaml"), "utf8");
+/** The hash of what the user reviews: flow.yaml, and prototype.html when the screens live there. */
+export function hashSpec(dir: string): string {
+  const proto = join(dir, "prototype.html");
+  return hashFlow(readFileSync(join(dir, "flow.yaml"), "utf8"), existsSync(proto) ? readFileSync(proto, "utf8") : undefined);
+}
 const approvalFile = (dir: string) => join(dir, "approval.json");
 
 function read(dir: string): Approval | undefined {
@@ -21,7 +29,7 @@ function read(dir: string): Approval | undefined {
 }
 
 export function approve(dir: string): Approval {
-  const a: Approval = { sha256: hashFlow(flowText(dir)), at: new Date().toISOString() };
+  const a: Approval = { sha256: hashSpec(dir), at: new Date().toISOString() };
   writeFileSync(approvalFile(dir), JSON.stringify(a, null, 2) + "\n");
   return a;
 }
@@ -30,7 +38,7 @@ export function approvalStatus(dir: string): { status: Status; openThreads: numb
   const a = read(dir);
   const openThreads = CommentStore.load(dir).threads.filter((t) => t.status === "open").length;
   if (!a) return { status: "draft", openThreads };
-  const status = existsSync(join(dir, "flow.yaml")) && a.sha256 === hashFlow(flowText(dir)) ? "approved" : "stale";
+  const status = existsSync(join(dir, "flow.yaml")) && a.sha256 === hashSpec(dir) ? "approved" : "stale";
   return { status, openThreads, approvedAt: a.at };
 }
 

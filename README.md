@@ -11,7 +11,7 @@
 
 Ask an agent to build a sign-up flow and it starts writing components. The branches it forgot (email already taken, code expired, five wrong passwords, offline) turn up in review, after the code exists.
 
-With Design Flow, the agent first writes the flow as `.design-flow/<feature>/flow.yaml`: every screen as HTML in your product's own style, the lanes they belong to and the arrows between them. A local server lays it out as a canvas and opens it in your browser. You click any button, field or arrow and leave a comment; the comment arrives in the agent's session; the agent changes the flow, replies, and the canvas updates while you watch. When it is right you press **Approve**, and only then does the agent start coding.
+With Design Flow, the agent first writes the flow as `.design-flow/<feature>/flow.yaml` (the lanes, the screens and the arrows between them) and `prototype.html` (every screen as one working page in your product's own style). A local server lays it out as a canvas and opens it in your browser. You click any button, field or arrow and leave a comment; the comment arrives in the agent's session; the agent changes the flow, replies, and the canvas updates while you watch. When it is right you press **Approve**, and only then does the agent start coding.
 
 ## Install
 
@@ -108,9 +108,17 @@ It changes `flow.yaml`, replies with `design-flow reply`, and resolves the threa
 
 **Approve** records the exact version of `flow.yaml` you were looking at and tells the agent it may start coding. If the file changes afterwards, the approval is withdrawn and the canvas asks again. The agent does not code the feature until `design-flow status` says `approved`.
 
-### Export
+### Play
 
-The download button exports the whole canvas as a PNG at 2×, with or without comment pins — for a PR description or a design review.
+**Play** (top right) runs the screens as a working demo, fitted to your window at the device's size. Tap through it the way a user would: buttons go where the arrows say, **Back** returns, and anything the prototype keeps in its own state carries from screen to screen.
+
+### Share
+
+**Share** (top right) has three ways out:
+
+- **Export HTML**: one file with the clickable demo and a list of screens. It opens in any browser, offline.
+- **Export image**: the whole canvas as a PNG at 2×, with or without comment pins.
+- **Create share link**: uploads that HTML as a secret GitHub gist with your own `gh` login and copies a link that opens the demo (served by [githack](https://raw.githack.com), which shows a one-click "Open the page" notice first). Anyone with the link can see it. Needs the [GitHub CLI](https://cli.github.com) and `gh auth login`.
 
 <p align="center">
   <img src="docs/images/export-lane.png" alt="Part of an exported PNG: the Sign up lane with the Email, Enter code, Create password and Account ready screens" width="960" />

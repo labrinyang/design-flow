@@ -7,8 +7,9 @@ import WebSocket from "ws";
 import { approvalStatus } from "../core/approval.ts";
 import { CommentStore, describeAnchor, type Locale } from "../core/comments.ts";
 import { parseFlow } from "../core/flow.ts";
-import { DEFAULT_PORT, projectKey, VERSION } from "../server/server.ts";
-import { TEMPLATE } from "./template.ts";
+import { checkPrototype, readPrototype } from "../core/prototype.ts";
+import { BUILD, DEFAULT_PORT, projectKey, VERSION } from "../server/server.ts";
+import { PROTOTYPE, TEMPLATE } from "./template.ts";
 
 declare const __DESIGN_FLOW_BUNDLE__: boolean | undefined;
 const FEATURE_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -55,6 +56,7 @@ interface ServerInfo {
   pid: number;
   port: number;
   version: string;
+  build?: string;
 }
 function readInfo(): ServerInfo | undefined {
   try {
@@ -63,14 +65,24 @@ function readInfo(): ServerInfo | undefined {
     return undefined;
   }
 }
-async function alive(info?: ServerInfo): Promise<boolean> {
-  if (!info) return false;
+async function health(info?: ServerInfo): Promise<{ build?: string } | undefined> {
+  if (!info) return undefined;
   try {
     const r = await fetch(`http://127.0.0.1:${info.port}/health`, { signal: AbortSignal.timeout(800) });
-    return r.ok;
+    return r.ok ? ((await r.json()) as { build?: string }) : undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+const alive = async (info?: ServerInfo) => !!(await health(info));
+
+async function stopServer(info: ServerInfo) {
+  try {
+    process.kill(info.pid);
+  } catch {
+    /* already gone */
+  }
+  for (let i = 0; i < 50 && (await alive(info)); i++) await new Promise((r) => setTimeout(r, 100));
 }
 
 export async function runningServer(): Promise<ServerInfo | undefined> {
@@ -79,8 +91,11 @@ export async function runningServer(): Promise<ServerInfo | undefined> {
 }
 
 async function ensureServer(): Promise<ServerInfo> {
-  const running = await runningServer();
-  if (running) return running;
+  const info = readInfo();
+  const h = await health(info);
+  if (h && h.build === BUILD) return info!;
+  // A server from another build (left running across an update) would serve the old canvas: replace it.
+  if (h && info) await stopServer(info);
   const self = fileURLToPath(import.meta.url);
   // Bundled: this file is scripts/design-flow.mjs and serves with `__serve`. Dev: dist/src/server/main.js.
   const bundled = typeof __DESIGN_FLOW_BUNDLE__ !== "undefined";
@@ -125,8 +140,11 @@ function printIssues(issues: ReturnType<typeof parseFlow>["issues"], dir: string
 }
 
 function check(dir: string, f: string): number {
-  const file = join(requireFeature(dir, f), "flow.yaml");
-  const { issues } = parseFlow(readFileSync(file, "utf8"), file);
+  const fd = requireFeature(dir, f);
+  const file = join(fd, "flow.yaml");
+  const { flow, issues } = parseFlow(readFileSync(file, "utf8"), file);
+  const proto = join(fd, "prototype.html");
+  if (flow && existsSync(proto)) issues.push(...checkPrototype(readPrototype(readFileSync(proto, "utf8")), flow, proto));
   if (!issues.length) {
     console.log(`${f}: clean`);
     return 0;
@@ -168,10 +186,11 @@ export async function main(argv: string[]): Promise<number> {
         let created = false;
         if (!existsSync(join(fd, "flow.yaml"))) {
           writeFileSync(join(fd, "flow.yaml"), TEMPLATE(f, `http://127.0.0.1:${info.port}/schema/flow.v1.json`));
+          if (!existsSync(join(fd, "prototype.html"))) writeFileSync(join(fd, "prototype.html"), PROTOTYPE(f));
           created = true;
         }
         const url = `http://127.0.0.1:${info.port}/p/${key}/${f}`;
-        if (created) console.log(`Created ${join(".design-flow", f, "flow.yaml")} from the template.`);
+        if (created) console.log(`Created ${join(".design-flow", f, "flow.yaml")} and prototype.html from the template.`);
         console.log(`Canvas: ${url}`);
         const code = check(dir, f);
         if (!a.flags["no-open"]) {

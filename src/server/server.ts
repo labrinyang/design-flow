@@ -1,15 +1,28 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import { approvalStatus, approve, hashFlow, takeApprovalEvent } from "../core/approval.ts";
+import { approvalStatus, approve, hashFlow, hashSpec, takeApprovalEvent } from "../core/approval.ts";
 import { CommentStore, describeAnchor, isOrphan, type Anchor, type Locale } from "../core/comments.ts";
 import { parseFlow, type Flow, type Issue } from "../core/flow.ts";
 import { layoutFlow, type Overrides } from "../core/layout.ts";
+import { applyPrototype, checkPrototype, readPrototype } from "../core/prototype.ts";
+import { shareDocument } from "../core/share.ts";
+
+const execFileP = promisify(execFile);
 import schema from "../../schema/flow.v1.json" with { type: "json" };
 
 export const VERSION = "0.1.0";
+/**
+ * Identifies this exact build of the code, so a CLI from a newer build can tell an older server
+ * still running in the background from its own and replace it.
+ */
+export const BUILD = createHash("sha1").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex").slice(0, 12);
 export const DEFAULT_PORT = 27420;
 const FEATURE_RE = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -22,6 +35,8 @@ export interface ServerOptions {
   home: string;
   webRoot?: string;
   locale?: Locale;
+  /** The gh CLI used to publish share links; "gh" on PATH by default. */
+  gh?: string;
 }
 
 interface Project {
@@ -174,7 +189,14 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       if (prev) p.lastValid.set(f, prev);
     }
     const issues: Issue[] = [...parsed.issues];
-    const flow = inlineScreens(parsed.flow ?? p.lastValid.get(f), dir, file, issues);
+    const protoFile = join(dir, "prototype.html");
+    const prototype = existsSync(protoFile) ? readFileSync(protoFile, "utf8") : undefined;
+    let flow = inlineScreens(parsed.flow ?? p.lastValid.get(f), dir, file, issues);
+    if (flow && prototype !== undefined) {
+      const proto = readPrototype(prototype);
+      if (parsed.flow) issues.push(...checkPrototype(proto, parsed.flow, protoFile));
+      flow = applyPrototype(flow, proto);
+    }
     const overrides = readJson<Overrides>(join(dir, "layout.json"), {});
     const layout = flow ? await layoutFlow(flow, overrides) : undefined;
     const threads = CommentStore.load(dir).threads.map((t) => ({
@@ -188,10 +210,39 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       flow,
       layout,
       issues,
-      sha256: hashFlow(text),
+      /** The whole interactive document, for Play. */
+      prototype,
+      sha256: hashFlow(text, prototype),
       threads,
       status: approvalStatus(dir),
     };
+  }
+
+  async function shareHtml(p: Project, f: string): Promise<string> {
+    const s = await state(p, f);
+    if (!s.flow) throw new HttpError(409, "flow.yaml has no valid version to share yet");
+    const ids = new Set(s.flow.edges.map((e) => e.to));
+    const start = (s.flow.screens.find((x) => !x.lane && !ids.has(x.id)) ?? s.flow.screens.find((x) => !ids.has(x.id)) ?? s.flow.screens[0]).id;
+    return shareDocument(s.flow, s.prototype, { start });
+  }
+
+  /** Publish the share page as a secret gist with the user's own gh login; returns the gist and a link that renders it. */
+  async function publishGist(f: string, html: string): Promise<{ gist: string; url: string }> {
+    const tmp = mkdtempSync(join(tmpdir(), "df-share-"));
+    const file = join(tmp, `${f}.html`);
+    writeFileSync(file, html);
+    try {
+      const { stdout } = await execFileP(opts.gh ?? "gh", ["gist", "create", file, "--desc", `Design Flow · ${f}`], { timeout: 60_000 });
+      const gist = stdout.trim().split(/\s+/).find((w) => /^https:\/\/gist\.github\.com\//.test(w));
+      if (!gist) throw new Error(`gh did not print a gist URL: ${stdout.trim()}`);
+      // githack serves the raw file as text/html from a CDN; viewers need no GitHub API quota or login.
+      const [owner, id] = new URL(gist).pathname.split("/").filter(Boolean);
+      return { gist, url: `https://gistcdn.githack.com/${owner}/${id}/raw/${f}.html` };
+    } catch (e) {
+      throw new HttpError(502, `Could not create the gist (${(e as Error).message.split("\n")[0]}). Install the GitHub CLI and run gh auth login, then try again.`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   }
 
   const send = (ws: WebSocket, m: unknown) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(m));
@@ -307,6 +358,12 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     const dir = checkFeature(p, f);
     const action = parts[4];
     if (!action && m === "GET") return reply(200, await state(p, f));
+    if (action === "share.html" && m === "GET") {
+      res.writeHead(200, { "content-type": MIME[".html"], "content-disposition": `attachment; filename="${f}.html"` });
+      res.end(await shareHtml(p, f));
+      return;
+    }
+    if (action === "share" && m === "POST") return reply(200, await publishGist(f, await shareHtml(p, f)));
     if (action === "layout" && m === "POST") {
       const moved = (await body(req)) as Record<string, { x: unknown; y: unknown }>;
       const clean: Overrides = {};
@@ -319,8 +376,8 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     } else if (action === "approve" && m === "POST") {
       const b = (await body(req)) as { sha256?: string };
       const text = readFileSync(join(dir, "flow.yaml"), "utf8");
-      if (!b.sha256 || b.sha256 !== hashFlow(text))
-        throw new HttpError(409, "flow.yaml changed since the canvas was drawn; review the new version and approve again");
+      if (!b.sha256 || b.sha256 !== hashSpec(dir))
+        throw new HttpError(409, "flow.yaml or prototype.html changed since the canvas was drawn; review the new version and approve again");
       if (parseFlow(text, "").issues.length) throw new HttpError(409, "flow.yaml has problems; it cannot be approved until check is clean");
       approve(dir);
     } else if (action === "comments" && m === "POST") {
@@ -404,7 +461,7 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       return;
     }
     if (path === "/health") {
-      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, app: "design-flow", version: VERSION }));
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, app: "design-flow", version: VERSION, build: BUILD }));
       return;
     }
     if (path === "/schema/flow.v1.json") {
@@ -455,7 +512,7 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
   });
 
   port = await listen(http, opts.port ?? DEFAULT_PORT);
-  writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, version: VERSION }, null, 2));
+  writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, version: VERSION, build: BUILD }, null, 2));
 
   return {
     port,

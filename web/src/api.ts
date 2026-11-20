@@ -13,6 +13,8 @@ export interface FeatureState {
   flow?: Flow;
   layout?: Layout;
   issues: Issue[];
+  /** prototype.html as written, when the feature has one. */
+  prototype?: string;
   sha256: string;
   threads: ViewThread[];
   status: { status: "draft" | "approved" | "stale"; openThreads: number; approvedAt?: string };
@@ -40,6 +42,7 @@ export const api = {
     api.post(`${api.feature(p, f)}/threads/${id}/${op}`, body),
   saveLayout: (p: string, f: string, o: Overrides) => api.post(`${api.feature(p, f)}/layout`, o),
   clearLayout: (p: string, f: string) => api.del(`${api.feature(p, f)}/layout`),
+  share: (p: string, f: string) => api.post<{ gist: string; url: string }>(`${api.feature(p, f)}/share`),
   approve: (p: string, f: string, sha256: string) => api.post(`${api.feature(p, f)}/approve`, { sha256 }),
 };
 

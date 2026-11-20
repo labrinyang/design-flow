@@ -1,59 +1,118 @@
-import { Button, IconButton, Panel, Textarea } from "@astrafoundry/design/ui";
-import { MessageSquare, X } from "lucide-react";
+import { IconButton, Kbd, Panel } from "@astrafoundry/design/ui";
+import { ArrowUp, CircleCheck, MessageSquare, RotateCcw, X } from "lucide-react";
 import { useState } from "react";
 import { api, type FeatureState, type ViewThread } from "./api.ts";
+import { sendsOnKey } from "./compose.ts";
 import { t } from "./i18n.ts";
 
-function ThreadView({ thread, state, active, onFocus }: { thread: ViewThread; state: FeatureState; active: boolean; onFocus: () => void }) {
-  const [draft, setDraft] = useState("");
-  const op = (o: "reply" | "resolve" | "reopen", body?: unknown) => api.thread(state.project, state.feature, thread.id, o, body);
+/** A text field that sends on Enter, with its send button inside it. */
+function Composer({
+  label,
+  placeholder,
+  rows = 1,
+  autoFocus,
+  onSend,
+  onEscape,
+}: {
+  label: string;
+  placeholder: string;
+  rows?: number;
+  autoFocus?: boolean;
+  onSend: (text: string) => Promise<unknown> | void;
+  onEscape?: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = () => {
+    const v = text.trim();
+    if (!v || busy) return;
+    setBusy(true);
+    void Promise.resolve(onSend(v))
+      .then(() => setText(""))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <form
+      className="material-field flex items-end gap-1 rounded-[14px] py-1 pr-1 pl-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <textarea
+        autoFocus={autoFocus}
+        aria-label={label}
+        placeholder={placeholder}
+        rows={rows}
+        value={text}
+        disabled={busy}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onEscape?.();
+          if (sendsOnKey({ key: e.key, shiftKey: e.shiftKey, altKey: e.altKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode })) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+        className="field-sizing-content max-h-40 min-h-7 flex-1 resize-none bg-transparent py-1.5 text-[14px] leading-snug text-foreground outline-none placeholder:text-muted-foreground/80"
+      />
+      <IconButton label={t.send} size="sm" variant={text.trim() ? "primary" : "ghost"} type="submit" disabled={!text.trim() || busy}>
+        <ArrowUp size={16} />
+      </IconButton>
+    </form>
+  );
+}
+
+function ThreadView({
+  thread,
+  state,
+  active,
+  onFocus,
+  onChange,
+}: {
+  thread: ViewThread;
+  state: FeatureState;
+  active: boolean;
+  onFocus: () => void;
+  onChange: (s: FeatureState) => void;
+}) {
+  const op = (o: "reply" | "resolve" | "reopen", body?: unknown) => api.thread(state.project, state.feature, thread.id, o, body).then(onChange);
+  const open = thread.status === "open";
   return (
     <li
       data-active={active}
+      data-thread={thread.id}
       className="rounded-2xl p-3 transition-colors data-[active=true]:bg-accent/60"
       onMouseEnter={onFocus}
     >
-      <button type="button" onClick={onFocus} className="mb-2 block w-full truncate text-left text-[12px] text-muted-foreground">
-        <span className="mr-1.5 font-mono tabular-nums">#{thread.id.slice(0, 4)}</span>
-        {thread.where}
-      </button>
-      <ul className="space-y-2">
+      <div className="mb-2 flex items-start gap-2">
+        <button type="button" onClick={onFocus} className="min-w-0 flex-1 truncate pt-1 text-left text-[12px] text-muted-foreground">
+          <span className="mr-1.5 font-mono tabular-nums">#{thread.id.slice(0, 4)}</span>
+          {thread.where}
+        </button>
+        {open ? (
+          <IconButton label={t.resolve} title={t.resolve} size="sm" variant="ghost" className="-mt-1 -mr-1" onClick={() => void op("resolve")}>
+            <CircleCheck size={17} />
+          </IconButton>
+        ) : (
+          <IconButton label={t.reopen} title={t.reopen} size="sm" variant="ghost" className="-mt-1 -mr-1" onClick={() => void op("reopen")}>
+            <RotateCcw size={15} />
+          </IconButton>
+        )}
+      </div>
+      <ul className="space-y-2.5">
         {thread.messages.map((m) => (
-          <li key={m.id} className="text-[14px] leading-snug">
-            <span className="mr-1.5 text-[12px] font-medium text-muted-foreground">{m.author === "agent" ? t.agent : t.you}</span>
-            <span className="text-pretty">{m.text}</span>
+          <li key={m.id} data-message className="text-[14px] leading-snug">
+            <div className="mb-0.5 text-[12px] font-medium text-muted-foreground">{m.author === "agent" ? t.agent : t.you}</div>
+            <p className="text-pretty whitespace-pre-wrap">{m.text}</p>
           </li>
         ))}
       </ul>
-      <form
-        className="mt-2 flex items-end gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!draft.trim()) return;
-          void op("reply", { text: draft.trim() }).then(() => setDraft(""));
-        }}
-      >
-        <Textarea
-          aria-label={t.reply}
-          placeholder={t.reply}
-          rows={1}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit();
-          }}
-          className="min-h-9 flex-1 resize-none text-[13px]"
-        />
-        {thread.status === "open" ? (
-          <Button size="sm" variant="secondary" type="button" onClick={() => void op("resolve")}>
-            {t.resolve}
-          </Button>
-        ) : (
-          <Button size="sm" variant="secondary" type="button" onClick={() => void op("reopen")}>
-            {t.reopen}
-          </Button>
-        )}
-      </form>
+      {open && (
+        <div className="mt-3">
+          <Composer label={t.reply} placeholder={t.reply} onSend={(text) => op("reply", { text })} />
+        </div>
+      )}
     </li>
   );
 }
@@ -63,8 +122,10 @@ export function CommentPanel({
   active,
   onFocus,
   onClose,
+  onChange,
 }: {
   state: FeatureState;
+  onChange: (s: FeatureState) => void;
   active?: string;
   onFocus: (id: string) => void;
   onClose: () => void;
@@ -78,7 +139,7 @@ export function CommentPanel({
         {title && <h3 className="px-3 pt-3 pb-1 text-[12px] font-medium text-muted-foreground">{title}</h3>}
         <ul>
           {list.map((th) => (
-            <ThreadView key={th.id} thread={th} state={state} active={active === th.id} onFocus={() => onFocus(th.id)} />
+            <ThreadView key={th.id} thread={th} state={state} active={active === th.id} onFocus={() => onFocus(th.id)} onChange={onChange} />
           ))}
         </ul>
       </section>
@@ -106,40 +167,23 @@ export function CommentPanel({
   );
 }
 
-export function NewComment({ onSubmit, onCancel, where }: { onSubmit: (text: string) => void; onCancel: () => void; where: string }) {
-  const [text, setText] = useState("");
+export function NewComment({ onSubmit, onCancel, where }: { onSubmit: (text: string) => Promise<unknown> | void; onCancel: () => void; where: string }) {
   return (
-    <Panel className="w-72" onClick={(e) => e.stopPropagation()}>
-      <p className="mb-2 truncate px-1 text-[12px] text-muted-foreground">{where}</p>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (text.trim()) onSubmit(text.trim());
-        }}
-        className="space-y-2"
-      >
-        <Textarea
-          autoFocus
-          aria-label={t.writeComment}
-          placeholder={t.writeComment}
-          rows={3}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") onCancel();
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit();
-          }}
-          className="resize-none text-[14px]"
-        />
-        <div className="flex justify-end gap-2">
-          <Button size="sm" variant="secondary" type="button" onClick={onCancel}>
-            {t.cancel}
-          </Button>
-          <Button size="sm" variant="primary" type="submit" disabled={!text.trim()}>
-            {t.send}
-          </Button>
-        </div>
-      </form>
+    <Panel className="w-80" onClick={(e) => e.stopPropagation()}>
+      <div className="mb-2 flex items-center gap-2 px-1">
+        <p className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">{where}</p>
+        <IconButton label={t.cancel} size="sm" variant="ghost" onClick={onCancel}>
+          <X size={15} />
+        </IconButton>
+      </div>
+      <Composer label={t.writeComment} placeholder={t.writeComment} rows={2} autoFocus onSend={onSubmit} onEscape={onCancel} />
+      <p className="mt-2 flex items-center gap-1 px-1 text-[12px] text-muted-foreground">
+        <Kbd>↵</Kbd>
+        <span className="mr-2">{t.toSend}</span>
+        <Kbd>⇧</Kbd>
+        <Kbd>↵</Kbd>
+        <span>{t.newLine}</span>
+      </p>
     </Panel>
   );
 }

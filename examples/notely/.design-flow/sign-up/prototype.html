@@ -1,0 +1,133 @@
+<!doctype html>
+<!-- One page for the whole flow: a <section data-screen> per screen; data-to moves to another screen. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --ink:#1c1b22; --muted:#6b6977; --line:#e6e4ee; --brand:#5b4bff; --brand-ink:#fff; --bad:#d6334a; --ok:#1f9d63; --bg:#fbfaff; }
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; display:flex; flex-direction:column; background:var(--bg); color:var(--ink); font:16px/1.45 -apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif; }
+  .bar { height:44px; display:flex; align-items:center; padding:0 16px; color:var(--muted); font-size:15px; }
+  main { flex:1; padding:12px 24px 28px; display:flex; flex-direction:column; gap:14px; }
+  h1 { font-size:30px; line-height:1.15; letter-spacing:-.5px; margin:8px 0 2px; }
+  p { margin:0; color:var(--muted); }
+  label { font-size:13px; color:var(--muted); display:block; margin-bottom:6px; }
+  .field { height:50px; border:1px solid var(--line); border-radius:12px; background:#fff; padding:0 14px; display:flex; align-items:center; color:var(--muted); }
+  .field.err { border-color:var(--bad); color:var(--ink); }
+  .hint { font-size:13px; color:var(--bad); margin-top:6px; }
+  .btn { height:52px; border-radius:14px; border:0; font:600 17px/52px inherit; text-align:center; background:#efedf7; color:var(--ink); }
+  .btn.main { background:var(--brand); color:var(--brand-ink); }
+  .btn.apple { background:#000; color:#fff; }
+  .link { text-align:center; color:var(--brand); font-weight:500; }
+  .or { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }
+  .or::before, .or::after { content:""; flex:1; height:1px; background:var(--line); }
+  .hero { flex:1; border-radius:24px; background:radial-gradient(120% 90% at 30% 20%, #e3defe, #f6f4ff 60%, var(--bg)); display:grid; place-items:center; font-size:64px; }
+  .code { display:flex; gap:10px; justify-content:center; }
+  .code span { width:48px; height:58px; border-radius:12px; border:1px solid var(--line); background:#fff; display:grid; place-items:center; font:600 24px/1 ui-monospace, monospace; }
+  .code span.on { border-color:var(--brand); box-shadow:0 0 0 3px #5b4bff22; }
+  .badge { width:76px; height:76px; border-radius:50%; display:grid; place-items:center; margin:36px auto 6px; font-size:34px; color:#fff; }
+  .center { text-align:center; }
+  .spacer { flex:1; }
+  .note { padding:12px 14px; border-radius:12px; background:#fff3f5; color:var(--bad); font-size:14px; }
+</style>
+<style>
+  [data-screen] { height: 100vh; display: flex; flex-direction: column; }
+  [data-to] { cursor: pointer; }
+  .bar a { color: inherit; text-decoration: none; }
+</style>
+<script>
+  // Shared state across screens: what the user typed carries forward.
+  window.notely = { email: "you@example.com" };
+</script>
+</head>
+<body>
+<section data-screen="W00">
+<div class="bar"></div>
+<main><div class="hero">✍️</div><h1>Notes that keep up with you</h1><p>Sync across your phone, tablet and Mac.</p>
+<button class="btn main" data-id="create" data-to="S01">Create account</button>
+<button class="btn" data-id="signin" data-to="L01">I already have an account</button></main>
+</section>
+
+<section data-screen="S01">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><h1>What's your email?</h1><p>We'll send a code to confirm it.</p>
+<div><label>Email</label><div class="field" data-id="email">you@example.com</div></div>
+<div class="or">or</div><button class="btn apple" data-id="apple" data-to="S04"> Continue with Apple</button>
+<div class="spacer"></div><button class="btn main" data-id="continue" data-to="S02">Continue</button></main>
+</section>
+
+<section data-screen="S02">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><h1>Check your inbox</h1><p>Enter the 6-digit code sent to you@example.com</p>
+<div class="code" data-id="code" data-to="S03"><span>4</span><span>8</span><span>1</span><span class="on"></span><span></span><span></span></div>
+<p class="center" data-id="resend">Resend code in 0:24</p><div class="spacer"></div></main>
+</section>
+
+<section data-screen="S03">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><h1>Create a password</h1><p>At least 8 characters, with a number.</p>
+<div><label>Password</label><div class="field" data-id="password">••••••••</div></div>
+<div class="spacer"></div><button class="btn main" data-id="create" data-to="S04">Create account</button></main>
+</section>
+
+<section data-screen="S04">
+<div class="bar"></div>
+<main><div class="badge" style="background:var(--ok)">✓</div><h1 class="center">You're in</h1><p class="center">Your notes will sync on every device you sign in to.</p>
+<div class="spacer"></div><button class="btn main" data-id="start">Start writing</button></main>
+</section>
+
+<section data-screen="L01">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><h1>Welcome back</h1>
+<div><label>Email</label><div class="field">you@example.com</div></div>
+<div><label>Password</label><div class="field" data-id="password">••••••••</div></div>
+<p class="link" data-id="forgot" data-to="L03">Forgot password?</p>
+<div class="spacer"></div><button class="btn main" data-id="signin" data-to="L02">Sign in</button></main>
+</section>
+
+<section data-screen="L02">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><h1>Welcome back</h1>
+<div><label>Email</label><div class="field">you@example.com</div></div>
+<div><label>Password</label><div class="field err" data-id="password">••••••</div><div class="hint">That password doesn't match. 4 tries left.</div></div>
+<p class="link" data-id="forgot" data-to="L03">Forgot password?</p>
+<div class="spacer"></div><button class="btn main" data-id="signin" data-to="X03">Sign in</button></main>
+</section>
+
+<section data-screen="L03">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><h1>Reset your password</h1><p>We'll email you a link to set a new one.</p>
+<div><label>Email</label><div class="field">you@example.com</div></div>
+<div class="spacer"></div><button class="btn main" data-id="send" data-to="L04">Send reset link</button></main>
+</section>
+
+<section data-screen="L04">
+<div class="bar"></div>
+<main><div class="badge" style="background:var(--brand)">✉︎</div><h1 class="center">Check your email</h1><p class="center">Open the link on this phone to choose a new password.</p>
+<div class="spacer"></div><button class="btn" data-id="back" data-to="L01">Back to sign in</button></main>
+</section>
+
+<section data-screen="X01">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><h1>You already have an account</h1><p>you@example.com is registered. Sign in instead?</p>
+<div class="spacer"></div><button class="btn main" data-id="signin" data-to="L01">Sign in</button><button class="btn" data-id="other" data-back>Use another email</button></main>
+</section>
+
+<section data-screen="X02">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><div class="badge" style="background:var(--bad)">!</div><h1 class="center">That code expired</h1><p class="center">Codes last 10 minutes.</p>
+<div class="spacer"></div><button class="btn main" data-id="resend" data-to="S02">Send a new code</button></main>
+</section>
+
+<section data-screen="X03">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><div class="badge" style="background:var(--bad)">🔒</div><h1 class="center">Too many tries</h1><p class="center">Sign-in is paused for 15 minutes. You can reset your password now.</p>
+<div class="spacer"></div><button class="btn main" data-id="reset" data-to="L03">Reset password</button></main>
+</section>
+
+<section data-screen="X04">
+<div class="bar"><a data-back>‹ Back</a></div>
+<main><div class="note">You're offline. We'll keep what you typed and try again when you're back.</div><div class="spacer"></div><button class="btn" data-id="retry">Try again</button></main>
+</section>
+</body>
+</html>
