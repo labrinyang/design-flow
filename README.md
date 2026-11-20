@@ -5,6 +5,12 @@
   Every screen, branch, error and way back, on one infinite canvas. You comment, the agent fixes it, you approve, then it codes.
 </p>
 
+<div align="center">
+<b>Join our Discord group! ⬇️ 加入我们的 Discord 群组</b>
+
+[![Discord](https://spine.stv.pm/badge/discord.svg)](https://discord.gg/PwZDHH4mv3)
+</div>
+
 <p align="center">
   <img src="docs/images/canvas.png" alt="The Design Flow canvas for a sign-up and sign-in flow: three lanes (Sign up, Sign in, Errors and interruptions), thirteen phone-sized screens drawn in the app's own style, and labelled arrows between them" width="960" />
 </p>
