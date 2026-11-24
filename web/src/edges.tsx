@@ -2,9 +2,15 @@ import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from "
 import { useState } from "react";
 import type { FlowEdge } from "./model.ts";
 
+/** Within a handle's few pixels of where the route expects a line end. */
+const near = (a: number, b: number) => Math.abs(a - b) < 8;
+
 export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps<FlowEdge>) {
+  const route = data?.route;
+  // The routed line holds while both frames sit where the layout put them; while one is dragged, a plain step line follows it.
+  const routed = !!route && near(sourceX, route.ends.sx) && near(sourceY, route.ends.sy) && near(targetX, route.ends.tx) && near(targetY, route.ends.ty);
   const backwards = targetX < sourceX;
-  const [path, labelX, labelY] = getSmoothStepPath({
+  const [stepPath, stepX, stepY] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
@@ -14,6 +20,9 @@ export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePos
     borderRadius: 6,
     offset: backwards ? 28 : 20,
   });
+  const path = routed ? route.d : stepPath;
+  const labelX = routed && route.label ? route.label.x : stepX;
+  const labelY = routed && route.label ? route.label.y : stepY;
   const tone = data?.tone ?? "neutral";
   const color = `var(--edge-${tone})`;
   const marker = `arrow-${id.replace(/[^A-Za-z0-9_-]/g, "_")}`;

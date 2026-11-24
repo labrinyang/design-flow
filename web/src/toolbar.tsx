@@ -20,6 +20,9 @@ import { useState } from "react";
 import { approveButton } from "./approve-button.ts";
 import type { FeatureState } from "./api.ts";
 import { t } from "./i18n.ts";
+import { IS_MAC } from "./zoom.ts";
+
+const MOD = IS_MAC ? "⌘" : "Ctrl ";
 
 /** The canvas's tools, floating at the bottom: comment, comments, zoom, a menu for the rest, approve. */
 export function Toolbar({
@@ -27,6 +30,8 @@ export function Toolbar({
   commenting,
   setCommenting,
   onTogglePanel,
+  onFit,
+  onActualSize,
   onRelayout,
   onApprove,
 }: {
@@ -34,6 +39,8 @@ export function Toolbar({
   commenting: boolean;
   setCommenting: (v: boolean) => void;
   onTogglePanel: () => void;
+  onFit: () => void;
+  onActualSize: () => void;
   onRelayout: () => void;
   onApprove: () => Promise<void>;
 }) {
@@ -58,7 +65,7 @@ export function Toolbar({
         <span className="tabular-nums">{openCount}</span>
       </Button>
       <span className="mx-1 h-5 w-px bg-border" />
-      <IconButton label={t.zoomOut} size="sm" variant="ghost" onClick={() => rf.zoomOut({ duration: 150 })}>
+      <IconButton label={t.zoomOut} title={`${t.zoomOut} (${MOD}−)`} size="sm" variant="ghost" onClick={() => rf.zoomOut({ duration: 150 })}>
         <Minus size={16} />
       </IconButton>
       <Menu>
@@ -69,11 +76,11 @@ export function Toolbar({
           <ChevronUp size={13} className="text-muted-foreground" />
         </MenuTrigger>
         <MenuPopup side="top" sideOffset={10}>
-          <MenuItem onClick={() => rf.fitView({ padding: 0.06, duration: 200 })}>
+          <MenuItem onClick={onFit} shortcut={`${MOD}0`}>
             <Maximize size={15} />
             {t.fit}
           </MenuItem>
-          <MenuItem onClick={() => rf.zoomTo(1, { duration: 200 })}>
+          <MenuItem onClick={onActualSize}>
             <span className="w-[15px] text-center text-[12px]">1:1</span>
             {t.actualSize}
           </MenuItem>
@@ -83,7 +90,7 @@ export function Toolbar({
           </MenuItem>
         </MenuPopup>
       </Menu>
-      <IconButton label={t.zoomIn} size="sm" variant="ghost" onClick={() => rf.zoomIn({ duration: 150 })}>
+      <IconButton label={t.zoomIn} title={`${t.zoomIn} (${MOD}+)`} size="sm" variant="ghost" onClick={() => rf.zoomIn({ duration: 150 })}>
         <Plus size={16} />
       </IconButton>
       <span className="mx-1 h-5 w-px bg-border" />

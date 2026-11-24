@@ -85,10 +85,10 @@ The agent picks a feature name, runs `design-flow open sign-up`, and writes `.de
 
 - **Lanes** group the flow (sign up, sign in, errors). An error lane marked "reachable from any step" holds interruptions that can happen anywhere.
 - **Frames** are the agent's HTML for each screen, rendered at the device's viewport in a sandbox with no network. Each has an id (`S02`) and a title.
-- **Arrows** are labelled with the action or trigger. Red arrows are errors; dashed arrows go back.
+- **Arrows** are labelled with the action or trigger. Red arrows are errors; dashed arrows go back. Arrows go around screens, never behind them: one that skips screens runs above them, and one that goes back runs below.
 - **Badges** mark screens that return home, animate or count down; the **legend** and **notes** sit above and below.
 
-Scroll to pan, ⌘-scroll to zoom. Drag a frame to move it; Design Flow remembers it, and **Re-layout** puts everything back.
+Scroll to pan; ⌘-scroll, Ctrl-scroll or pinch to zoom, up to 800%, wherever the pointer is. ⌘+ and ⌘− zoom too (Ctrl on Windows and Linux), ⌘0 fits the whole flow in the window, and **Actual size** in the zoom menu shows screens at their real size. While you comment, scrolling over a screen that is longer than its frame scrolls that screen first, then the canvas. Drag a frame to move it; Design Flow remembers it, and **Re-layout** puts everything back.
 
 ### 3. Comment on anything
 

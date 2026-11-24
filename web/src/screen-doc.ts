@@ -39,12 +39,66 @@ export function selectorFor(el: ElementLike, body: ElementLike): string {
   return parts.join(" > ");
 }
 
-/** Runs inside the sandboxed frame. Reports clicks and hovers to the canvas; never touches the network. */
+interface ScrollerLike {
+  nodeType: number;
+  parentElement: ScrollerLike | null;
+  scrollTop: number;
+  scrollLeft: number;
+  scrollHeight: number;
+  scrollWidth: number;
+  clientHeight: number;
+  clientWidth: number;
+}
+
+/**
+ * Whether a wheel of (dx, dy) over `el` scrolls something inside the frame: a scroll area around `el`,
+ * or the page itself, with room left that way.
+ * Self-contained: the frame script embeds its source, where no outer helper exists.
+ */
+export function scrollsInside(
+  el: ScrollerLike | null,
+  dx: number,
+  dy: number,
+  doc: { scrollingElement: ScrollerLike | null; documentElement: ScrollerLike; body: ScrollerLike | null },
+  style: (el: ScrollerLike) => { overflowX: string; overflowY: string },
+): boolean {
+  const root = doc.scrollingElement ?? doc.documentElement;
+  let page = style(doc.documentElement);
+  // The page scrolls by html's overflow, or by body's when html leaves both axes visible.
+  const bodyLends = page.overflowX === "visible" && page.overflowY === "visible" && !!doc.body;
+  if (bodyLends && doc.body) page = style(doc.body);
+  for (let cur = el; cur && cur.nodeType === 1; cur = cur.parentElement) {
+    let canX: boolean;
+    let canY: boolean;
+    if (cur === root) {
+      canX = !/hidden|clip/.test(page.overflowX);
+      canY = !/hidden|clip/.test(page.overflowY);
+    } else if (cur === doc.body && bodyLends) {
+      continue;
+    } else {
+      const s = style(cur);
+      canX = /auto|scroll|overlay/.test(s.overflowX);
+      canY = /auto|scroll|overlay/.test(s.overflowY);
+    }
+    if (dy && canY && (dy > 0 ? cur.scrollTop + cur.clientHeight < cur.scrollHeight - 1 : cur.scrollTop > 0)) return true;
+    if (dx && canX && (dx > 0 ? cur.scrollLeft + cur.clientWidth < cur.scrollWidth - 1 : cur.scrollLeft > 0)) return true;
+  }
+  return false;
+}
+
+/**
+ * Runs inside the sandboxed frame. Reports clicks and hovers to the canvas; never touches the network.
+ * A frame takes the pointer while commenting, so it also hands wheels to the canvas, which pans and
+ * zooms under it as everywhere else. Ctrl or ⌘ (and a pinch) always zoom the canvas. A plain wheel
+ * first scrolls the screen while it, or a scroll area under the pointer, has room left that way, as a
+ * nested scroll area would; one gesture stays with whichever it started on.
+ */
 function frameScript(channel: string) {
   const sel = selectorFor.toString();
+  const scroll = scrollsInside.toString();
   return `<script>(function(){
 var channel=${JSON.stringify(channel)};var commenting=false;var hovered=null;
-var selectorFor=${sel};
+var selectorFor=${sel};var scrollsInside=${scroll};var wheelTo=null,wheelAt=0,pinned=null;
 function send(m){m.channel=channel;parent.postMessage(m,"*");}
 var ring=document.createElement("div");
 ring.style.cssText="position:fixed;pointer-events:none;outline:3px solid #ffcc00;outline-offset:2px;border-radius:4px;z-index:2147483647;display:none";
@@ -55,7 +109,7 @@ document.documentElement.appendChild(pin);
 function place(box,el){if(!el||el===document.body||el===document.documentElement){box.style.display="none";return;}var r=el.getBoundingClientRect();box.style.display="block";box.style.left=r.left+"px";box.style.top=r.top+"px";box.style.width=r.width+"px";box.style.height=r.height+"px";}
 function mark(el){place(ring,el);}
 addEventListener("message",function(e){if(e.source!==parent||!e.data||e.data.channel!==channel)return;if(e.data.type==="commenting"){commenting=!!e.data.on;if(!commenting)mark(null);}
-  if(e.data.type==="highlight"){var t=null;try{t=e.data.selector?document.querySelector(e.data.selector):null;}catch(_){}place(pin,t);}
+  if(e.data.type==="highlight"){var t=null;try{t=e.data.selector?document.querySelector(e.data.selector):null;}catch(_){}pinned=t;place(pin,t);}
   if(e.data.type==="snapshot"){ring.style.display="none";pin.style.display="none";var n=document.documentElement.cloneNode(true);n.querySelectorAll("body").forEach(function(b){b.style.height=innerHeight+"px";});n.querySelectorAll("script").forEach(function(x){x.remove();});var m=n.querySelector('meta[http-equiv]');if(m)m.remove();send({type:"snapshot",id:e.data.id,html:new XMLSerializer().serializeToString(n),width:innerWidth,height:innerHeight});}});
 document.addEventListener("mousemove",function(e){if(!commenting)return;var el=e.target;if(el!==hovered){hovered=el;mark(el);}},true);
 document.addEventListener("click",function(e){
@@ -67,6 +121,12 @@ document.addEventListener("click",function(e){
     element:onBody?null:{selector:selectorFor(el,document.body),tag:el.localName,text:(el.innerText||el.getAttribute("aria-label")||el.getAttribute("placeholder")||"").trim().replace(/\\s+/g," ").slice(0,80)}});
 },true);
 document.addEventListener("submit",function(e){e.preventDefault();},true);
+addEventListener("wheel",function(e){
+  if(!e.ctrlKey&&!e.metaKey){var now=Date.now();
+    if(wheelTo===null||now-wheelAt>200)wheelTo=scrollsInside(e.target,e.deltaX,e.deltaY,document,function(x){return getComputedStyle(x);})?"frame":"canvas";
+    wheelAt=now;if(wheelTo==="frame")return;}
+  e.preventDefault();send({type:"wheel",x:e.clientX,y:e.clientY,dx:e.deltaX,dy:e.deltaY,mode:e.deltaMode,ctrl:e.ctrlKey,meta:e.metaKey,shift:e.shiftKey,alt:e.altKey});},{passive:false});
+addEventListener("scroll",function(){if(commenting&&hovered)mark(hovered);if(pinned)place(pin,pinned);},true);
 send({type:"ready"});
 })();</script>`;
 }
@@ -105,6 +165,41 @@ export function acceptFrameMessage(
   if (!f || !e.source || e.source !== f.window()) return undefined;
   if (typeof d.x !== "number" || typeof d.y !== "number") return undefined;
   return { screen: f.screen, x: d.x, y: d.y, element: d.element ?? null };
+}
+
+/** A wheel or pinch over a frame, in the frame's own CSS px, to be replayed on the canvas. */
+export interface FrameWheelData {
+  channel: string;
+  x: number;
+  y: number;
+  deltaX: number;
+  deltaY: number;
+  deltaMode: number;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}
+
+/** A wheel from a registered frame, checked against that frame's own window. */
+export function acceptFrameWheel(
+  e: { data: unknown; source: MessageEventSource | null },
+  frames: Map<string, { window: () => MessageEventSource | null | undefined }>,
+): FrameWheelData | undefined {
+  const d = e.data as Record<string, unknown> | null;
+  if (!d || typeof d.channel !== "string" || d.type !== "wheel") return undefined;
+  const f = frames.get(d.channel);
+  if (!f || !e.source || e.source !== f.window()) return undefined;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const [x, y, deltaX, deltaY, deltaMode] = [num(d.x), num(d.y), num(d.dx), num(d.dy), num(d.mode)];
+  if (x === undefined || y === undefined || deltaX === undefined || deltaY === undefined || deltaMode === undefined) return undefined;
+  return { channel: d.channel, x, y, deltaX, deltaY, deltaMode, ctrlKey: d.ctrl === true, metaKey: d.meta === true, shiftKey: d.shift === true, altKey: d.alt === true };
+}
+
+/** Where a point inside a frame (its own CSS px) is on the page, from the frame's on-screen box and its CSS width. */
+export function frameToClient(p: { x: number; y: number }, rect: { left: number; top: number; width: number }, frameWidth: number) {
+  const k = rect.width / frameWidth;
+  return { x: rect.left + p.x * k, y: rect.top + p.y * k };
 }
 
 /** SVG image of a frame's cloned document, sized as the frame's viewport so vh/% layouts keep their shape. */

@@ -5,9 +5,12 @@ import {
   getNodesBounds,
   ReactFlow,
   ReactFlowProvider,
+  useNodesInitialized,
   useNodesState,
+  useOptionsStore,
   useReactFlow,
   useViewport,
+  useViewportStore,
   ViewportPortal,
   type EdgeTypes,
   type Node,
@@ -27,11 +30,12 @@ import { CommentPanel, NewComment } from "./comments.tsx";
 import { markOf, placeDraft } from "./draft.ts";
 import { FlowEdgeView } from "./edges.tsx";
 import { locale, t } from "./i18n.ts";
-import { legendOf, toReactFlow } from "./model.ts";
+import { LABEL_H, LANE_TITLE_OVERHANG, legendOf, NOTE_H, toReactFlow } from "./model.ts";
 import { frameEvents, highlightInFrame, LaneNodeView, ScreenNodeView, type FrameClick } from "./nodes.tsx";
 import { Toolbar } from "./toolbar.tsx";
 import { Play as PlayView } from "./play.tsx";
 import { ShareMenu } from "./share.tsx";
+import { actualSizeZoom, chromeScale, fitViewport, IS_MAC, MAX_ZOOM, MIN_ZOOM, pinScale, wheelZoomStep, zoomAround, type Insets } from "./zoom.ts";
 
 function NotesNode({ data }: { data: { notes: string[] } }) {
   return (
@@ -70,9 +74,19 @@ export function Legend({ flow }: { flow: Flow }) {
   );
 }
 
-function buildNodes(flow: Flow, layout: Layout): Node[] {
-  const g = toReactFlow(flow, layout);
-  const nodes: Node[] = g.nodes as Node[];
+/** Text width in canvas pixels, in the page's own font. */
+const measureText = (() => {
+  let ctx: CanvasRenderingContext2D | null = null;
+  return (text: string, f: { size: number; weight: number }) => {
+    ctx ??= document.createElement("canvas").getContext("2d");
+    if (!ctx) return text.length * f.size * 0.56;
+    ctx.font = `${f.weight} ${f.size}px ${getComputedStyle(document.body).fontFamily}`;
+    return ctx.measureText(text).width;
+  };
+})();
+
+function buildNodes(g: { nodes: Node[] }, flow: Flow, layout: Layout): Node[] {
+  const nodes: Node[] = [...g.nodes];
   if (flow.notes.length)
     nodes.push({ id: "notes", type: "notes", position: { x: 40, y: layout.height }, data: { notes: flow.notes }, draggable: false, selectable: false });
   return nodes;
@@ -93,7 +107,7 @@ function Pins({ state, active, onPick }: { state: FeatureState; active?: string;
             onPick(th.id);
           }}
           className={
-            "nodrag nopan absolute flex size-7 -translate-x-1/2 -translate-y-full items-center justify-center rounded-full rounded-bl-none text-[12px] font-medium tabular-nums shadow-3 transition-transform " +
+            "nodrag nopan absolute flex size-7 -translate-x-1/2 -translate-y-full items-center justify-center rounded-full rounded-bl-none text-[12px] font-medium tabular-nums shadow-3 transition-[scale] " +
             (active === th.id ? "scale-110 bg-primary text-primary-foreground" : "bg-substrate text-substrate-hi")
           }
           style={{ left: th.anchor.point.x, top: th.anchor.point.y, pointerEvents: "all" }}
@@ -116,10 +130,23 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   const [playing, setPlaying] = useState(false);
   const fitted = useRef(false);
 
-  const graph = useMemo(() => (state?.flow && state.layout ? toReactFlow(state.flow, state.layout) : undefined), [state]);
+  // Labels and lane titles are measured in the page's font, so lines are routed again once it has loaded.
+  const [fontsReady, setFontsReady] = useState(false);
   useEffect(() => {
-    if (state?.flow && state.layout) setNodes(buildNodes(state.flow, state.layout));
-  }, [state, setNodes]);
+    const family = getComputedStyle(document.body).fontFamily;
+    // load() starts the page font's regular and medium faces and settles once they are in; fonts.ready alone can settle before they are even requested.
+    void Promise.all([document.fonts.load(`400 13px ${family}`), document.fonts.load(`500 13px ${family}`)])
+      .catch(() => undefined)
+      .then(() => setFontsReady(true));
+  }, []);
+  const graph = useMemo(
+    () => (state?.flow && state.layout ? toReactFlow(state.flow, state.layout, { measure: measureText, enterAny: t.enterAny }) : undefined),
+    // fontsReady is not read inside: it only triggers measuring again.
+    [state, fontsReady],
+  );
+  useEffect(() => {
+    if (graph && state?.flow && state.layout) setNodes(buildNodes(graph as { nodes: Node[] }, state.flow, state.layout));
+  }, [graph, state, setNodes]);
   // Frames forward clicks only while commenting.
   useEffect(() => {
     setNodes((ns) => ns.map((n) => (n.type === "screen" ? { ...n, data: { ...n.data, commenting } } : n)));
@@ -137,15 +164,66 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     frameEvents.addEventListener("comment", onFrame);
     return () => frameEvents.removeEventListener("comment", onFrame);
   }, [state, rf]);
+  /** Show every screen with its title and note, clear of the toolbar and an open comment panel. */
+  const fitToWindow = useCallback(
+    (duration = 0) => {
+      const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
+      const ns = rf.getNodes();
+      if (!canvas || !ns.length) return;
+      void rf.setViewport(fitViewport(visualBounds(ns), canvas, fitInsets(canvas)), { duration });
+    },
+    [rf],
+  );
+  // The first fit waits until every node is measured, so the notes and lane sizes count.
+  const nodesReady = useNodesInitialized();
   useEffect(() => {
-    if (nodes.length && !fitted.current) {
+    if (nodesReady && nodes.length && !fitted.current) {
       fitted.current = true;
-      requestAnimationFrame(() => rf.fitView({ padding: 0.06 }));
+      requestAnimationFrame(() => fitToWindow());
     }
-  }, [nodes, rf]);
+  }, [nodesReady, nodes.length, fitToWindow]);
+
+  /** Screens at their real CSS size, around the middle of the canvas. */
+  const actualSize = useCallback(() => {
+    const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
+    if (!canvas || !state?.flow || !state.layout) return;
+    const center = rf.screenToFlowPosition({ x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 });
+    void rf.zoomTo(actualSizeZoom(state.flow, state.layout, center), { duration: 200 });
+  }, [rf, state]);
+
+  // Ctrl or ⌘ with the wheel, and a trackpad pinch, zoom the canvas wherever the pointer is (a screen,
+  // the toolbar, the comment panel, the header), never the browser page. Frames forward theirs here too.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      const target = e.target instanceof Element ? e.target : null;
+      // The new-comment box keeps its own wheel; Play shows no canvas.
+      if (target?.closest("[data-draft], [data-play]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (target?.closest('[role="dialog"], [role="alertdialog"]')) return;
+      const r = document.querySelector(".react-flow")?.getBoundingClientRect();
+      if (!r) return;
+      const p = { x: Math.min(Math.max(e.clientX - r.left, 0), r.width), y: Math.min(Math.max(e.clientY - r.top, 0), r.height) };
+      void rf.setViewport(zoomAround(rf.getViewport(), p, wheelZoomStep(e.deltaY, e.deltaMode, IS_MAC)));
+    };
+    window.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => window.removeEventListener("wheel", onWheel, { capture: true });
+  }, [rf]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // ⌘ + / ⌘ − / ⌘ 0 (Ctrl elsewhere) zoom the canvas instead of the page, even while typing a comment.
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !playing) {
+        const zoom = e.key === "=" || e.key === "+" ? "in" : e.key === "-" || e.key === "_" ? "out" : e.key === "0" ? "fit" : undefined;
+        if (zoom) {
+          e.preventDefault();
+          if (zoom === "in") void rf.zoomIn({ duration: 150 });
+          else if (zoom === "out") void rf.zoomOut({ duration: 150 });
+          else fitToWindow(200);
+          return;
+        }
+      }
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.key === "c" && !e.metaKey && !e.ctrlKey) setCommenting((v) => !v);
@@ -156,7 +234,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [rf, fitToWindow, playing]);
 
 
   const onNodeDragStop = useCallback(
@@ -205,17 +283,26 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     const pins = withComments && state ? state.threads.filter((x) => x.status === "open").map((x) => ({ x: x.anchor.point.x - 14, y: x.anchor.point.y - 28, width: 28, height: 28 })) : [];
     const b = exportBounds([nodeBoxes, ...pins], 48);
     const bg = getComputedStyle(document.documentElement).getPropertyValue("--canvas");
+    // The picture is drawn at 100%, so pins and outlines take their 100% size there whatever the zoom on screen.
+    const root = viewport.closest<HTMLElement>(".react-flow");
+    const scales = (["--df-chrome", "--df-pin"] as const).map((k) => [k, root?.style.getPropertyValue(k) ?? ""] as const);
+    for (const [k] of scales) root?.style.setProperty(k, "1");
     // Sandboxed frames cannot be read from outside: ask each for its markup and put a picture in its place.
     const restore = await swapFramesForSnapshots(viewport);
-    const url = await toPng(viewport, {
-      backgroundColor: bg.trim() || undefined,
-      width: b.width,
-      height: b.height,
-      pixelRatio: 2,
-      filter: (n) => withComments || !(n instanceof HTMLElement && n.dataset.pin !== undefined),
-      style: { width: `${b.width}px`, height: `${b.height}px`, transform: `translate(${-b.x}px, ${-b.y}px) scale(1)` },
-    });
-    restore();
+    let url: string;
+    try {
+      url = await toPng(viewport, {
+        backgroundColor: bg.trim() || undefined,
+        width: b.width,
+        height: b.height,
+        pixelRatio: 2,
+        filter: (n) => withComments || !(n instanceof HTMLElement && n.dataset.pin !== undefined),
+        style: { width: `${b.width}px`, height: `${b.height}px`, transform: `translate(${-b.x}px, ${-b.y}px) scale(1)` },
+      });
+    } finally {
+      restore();
+      for (const [k, v] of scales) root?.style.setProperty(k, v);
+    }
     const a = document.createElement("a");
     a.href = url;
     a.download = `${feature}.png`;
@@ -276,16 +363,17 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
             onNodesChange={onNodesChange}
             onNodeDragStop={onNodeDragStop}
             nodesDraggable={!commenting}
-            minZoom={0.1}
-            maxZoom={2.5}
+            minZoom={MIN_ZOOM}
+            maxZoom={MAX_ZOOM}
             proOptions={{ hideAttribution: true }}
             nodesConnectable={false}
             zoomOnScroll={false}
             panOnScroll
-            zoomActivationKeyCode="Meta"
+            zoomActivationKeyCode={null}
             deleteKeyCode={null}
           >
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} />
+            <ChromeScale />
             <Pins
               state={state}
               active={activeThread}
@@ -299,6 +387,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         {draft && flow && (
           <DraftAt point={draft.anchor.point}>
             <NewComment
+              focusKey={draft.anchor}
               where={describeAnchor(draft.anchor, flow, locale)}
               onCancel={() => setDraft(undefined)}
               onSubmit={(text) =>
@@ -316,6 +405,8 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           commenting={commenting}
           setCommenting={setCommenting}
           onTogglePanel={() => setPanelOpen((v) => !v)}
+          onFit={() => fitToWindow(200)}
+          onActualSize={actualSize}
           onRelayout={() => void api.clearLayout(project, feature).then(setState)}
           onApprove={() => api.approve(project, feature, state.sha256).then(setState)}
         />
@@ -335,6 +426,49 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       </main>
     </div>
   );
+}
+
+/** Publishes the scales for outlines (--df-chrome) and pins (--df-pin) on the canvas, for index.css. */
+function ChromeScale() {
+  const zoom = useViewportStore((s) => s.transform[2]);
+  const root = useOptionsStore((s) => s.domNode);
+  useEffect(() => {
+    root?.style.setProperty("--df-chrome", String(chromeScale(zoom)));
+    root?.style.setProperty("--df-pin", String(pinScale(zoom)));
+  }, [root, zoom]);
+  return null;
+}
+
+/** Every node's box in flow coordinates, with screen titles and notes and lane titles, which sit outside their nodes. */
+function visualBounds(nodes: Node[]) {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const n of nodes) {
+    const w = n.measured?.width ?? n.width ?? 0;
+    const h = n.measured?.height ?? n.height ?? 0;
+    const above = n.type === "screen" ? LABEL_H : n.type === "lane" ? LANE_TITLE_OVERHANG : 0;
+    const below = n.type === "screen" ? NOTE_H : 0;
+    x0 = Math.min(x0, n.position.x);
+    y0 = Math.min(y0, n.position.y - above);
+    x1 = Math.max(x1, n.position.x + w);
+    y1 = Math.max(y1, n.position.y + h + below);
+  }
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+/** What the floating toolbar and an open comment panel cover, plus a margin, on each side of the canvas. */
+function fitInsets(canvas: DOMRect): Insets {
+  const margin = 24;
+  const bar = document.querySelector("[data-toolbar]")?.getBoundingClientRect();
+  const panel = document.querySelector("[data-comment-panel]")?.getBoundingClientRect();
+  return {
+    top: margin,
+    left: margin,
+    bottom: bar ? Math.max(margin, canvas.bottom - bar.top + 16) : margin,
+    right: panel ? Math.max(margin, canvas.right - panel.left + 16) : margin,
+  };
 }
 
 /**

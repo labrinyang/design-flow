@@ -2,7 +2,7 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useEffect, useMemo, useRef } from "react";
 import { t } from "./i18n.ts";
 import { LABEL_H, NOTE_H, type LaneNode, type ScreenNode } from "./model.ts";
-import { acceptFrameMessage, screenDocument, viewportOf } from "./screen-doc.ts";
+import { acceptFrameMessage, acceptFrameWheel, frameToClient, screenDocument, viewportOf, type FrameWheelData } from "./screen-doc.ts";
 
 export interface FrameClick {
   screen: string;
@@ -14,13 +14,41 @@ export interface FrameClick {
 
 /** Click reports from every frame go through one listener on the canvas. */
 export const frameEvents = new EventTarget();
-const frames = new Map<string, { screen: string; window: () => Window | null | undefined }>();
+const frames = new Map<string, { screen: string; window: () => Window | null | undefined; element: () => HTMLIFrameElement | null }>();
 
 if (typeof window !== "undefined")
   window.addEventListener("message", (e) => {
     const click = acceptFrameMessage(e, frames);
-    if (click) frameEvents.dispatchEvent(new CustomEvent<FrameClick>("comment", { detail: click }));
+    if (click) return void frameEvents.dispatchEvent(new CustomEvent<FrameClick>("comment", { detail: click }));
+    const wheel = acceptFrameWheel(e, frames);
+    if (wheel) replayWheel(wheel);
   });
+
+/**
+ * Replay a wheel or pinch from inside a frame on the frame's box, at the same spot on the page.
+ * React Flow then pans or zooms exactly as it does over a frame when not commenting.
+ */
+function replayWheel(w: FrameWheelData) {
+  const iframe = frames.get(w.channel)?.element();
+  const box = iframe?.parentElement;
+  if (!iframe || !box) return;
+  const at = frameToClient(w, iframe.getBoundingClientRect(), iframe.offsetWidth);
+  box.dispatchEvent(
+    new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      clientX: at.x,
+      clientY: at.y,
+      deltaX: w.deltaX,
+      deltaY: w.deltaY,
+      deltaMode: w.deltaMode,
+      ctrlKey: w.ctrlKey,
+      metaKey: w.metaKey,
+      shiftKey: w.shiftKey,
+      altKey: w.altKey,
+    }),
+  );
+}
 
 /** Ring one element inside a screen's frame (or clear every frame's ring with no screen). */
 export function highlightInFrame(screen: string | undefined, selector: string | undefined) {
@@ -39,7 +67,7 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
   const frame = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
-    frames.set(channel, { screen: screen.id, window: () => frame.current?.contentWindow });
+    frames.set(channel, { screen: screen.id, window: () => frame.current?.contentWindow, element: () => frame.current });
     return () => void frames.delete(channel);
   }, [channel, screen.id]);
 

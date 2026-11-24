@@ -1,6 +1,6 @@
 import { IconButton, Kbd, Panel } from "@astrafoundry/design/ui";
 import { ArrowUp, CircleCheck, MessageSquare, RotateCcw, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type FeatureState, type ViewThread } from "./api.ts";
 import { sendsOnKey } from "./compose.ts";
 import { t } from "./i18n.ts";
@@ -11,6 +11,7 @@ function Composer({
   placeholder,
   rows = 1,
   autoFocus,
+  focusKey,
   onSend,
   onEscape,
 }: {
@@ -18,11 +19,17 @@ function Composer({
   placeholder: string;
   rows?: number;
   autoFocus?: boolean;
+  /** With autoFocus: take the focus again whenever this changes. */
+  focusKey?: unknown;
   onSend: (text: string) => Promise<unknown> | void;
   onEscape?: () => void;
 }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const field = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (autoFocus) field.current?.focus();
+  }, [autoFocus, focusKey]);
   const submit = () => {
     const v = text.trim();
     if (!v || busy) return;
@@ -40,6 +47,7 @@ function Composer({
       }}
     >
       <textarea
+        ref={field}
         autoFocus={autoFocus}
         aria-label={label}
         placeholder={placeholder}
@@ -167,16 +175,35 @@ export function CommentPanel({
   );
 }
 
-export function NewComment({ onSubmit, onCancel, where }: { onSubmit: (text: string) => Promise<unknown> | void; onCancel: () => void; where: string }) {
+/** The box for a new comment. When the user clicks elsewhere it moves there with the text so far, and keeps the focus. */
+export function NewComment({
+  onSubmit,
+  onCancel,
+  where,
+  focusKey,
+}: {
+  onSubmit: (text: string) => Promise<unknown> | void;
+  onCancel: () => void;
+  where: string;
+  /** The anchor: a new one means the box moved, and its field takes the focus again. */
+  focusKey?: unknown;
+}) {
   return (
-    <Panel className="w-80" onClick={(e) => e.stopPropagation()}>
+    <Panel
+      className="w-80"
+      onClick={(e) => e.stopPropagation()}
+      // Clicking the box's own empty space keeps the text field focused.
+      onMouseDown={(e) => {
+        if (!(e.target as HTMLElement).closest("button, textarea, input, a")) e.preventDefault();
+      }}
+    >
       <div className="mb-2 flex items-center gap-2 px-1">
         <p className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">{where}</p>
         <IconButton label={t.cancel} size="sm" variant="ghost" onClick={onCancel}>
           <X size={15} />
         </IconButton>
       </div>
-      <Composer label={t.writeComment} placeholder={t.writeComment} rows={2} autoFocus onSend={onSubmit} onEscape={onCancel} />
+      <Composer label={t.writeComment} placeholder={t.writeComment} rows={2} autoFocus focusKey={focusKey} onSend={onSubmit} onEscape={onCancel} />
       <p className="mt-2 flex items-center gap-1 px-1 text-[12px] text-muted-foreground">
         <Kbd>↵</Kbd>
         <span className="mr-2">{t.toSend}</span>

@@ -110,6 +110,85 @@ describe("acceptFrameMessage", () => {
   });
 });
 
+import { acceptFrameWheel, frameToClient, scrollsInside } from "../web/src/screen-doc.ts";
+describe("frame wheel", () => {
+  it("hands wheels to the canvas unless the screen itself can scroll that way", () => {
+    const doc = screenDocument(flow, flow.screens[0], { channel: "abc" });
+    expect(doc).toContain('addEventListener("wheel"');
+    expect(doc).toContain("{passive:false}");
+    expect(doc).toContain('type:"wheel"');
+    expect(doc).toContain("var scrollsInside=");
+  });
+
+  // A frame 844px tall; "box" stands for any element, "list" for a scroll area inside the page.
+  type Box = { nodeType: number; parentElement: Box | null; scrollTop: number; scrollLeft: number; scrollHeight: number; scrollWidth: number; clientHeight: number; clientWidth: number; overflowX: string; overflowY: string };
+  const box = (parent: Box | null, o: Partial<Box> = {}): Box => ({ nodeType: 1, parentElement: parent, scrollTop: 0, scrollLeft: 0, scrollHeight: 100, scrollWidth: 390, clientHeight: 100, clientWidth: 390, overflowX: "visible", overflowY: "visible", ...o });
+  const page = (pageHeight: number, o: { html?: Partial<Box>; body?: Partial<Box>; list?: Partial<Box> } = {}) => {
+    const html = box(null, { scrollHeight: pageHeight, clientHeight: 844, ...o.html });
+    const body = box(html, o.body);
+    const list = box(body, { overflowY: "auto", scrollHeight: 600, clientHeight: 300, ...o.list });
+    const button = box(list);
+    return { doc: { scrollingElement: html, documentElement: html, body }, button, html };
+  };
+  // Runs from its own source alone, as it does inside a frame after minification.
+  const run = new Function(`return (${scrollsInside.toString()})`)() as typeof scrollsInside;
+  const style = (b: object) => b as Box;
+
+  it("scrolls a page longer than its frame, but only while there is room left that way", () => {
+    const long = page(1800, { list: { scrollHeight: 300 } });
+    expect(run(long.button, 0, 100, long.doc, style)).toBe(true);
+    expect(run(long.button, 0, -100, long.doc, style)).toBe(false);
+    long.html.scrollTop = 1800 - 844;
+    expect(run(long.button, 0, 100, long.doc, style)).toBe(false);
+    expect(run(long.button, 0, -100, long.doc, style)).toBe(true);
+  });
+
+  it("scrolls a scroll area under the pointer before handing the wheel on", () => {
+    const fits = page(844);
+    expect(run(fits.button, 0, 100, fits.doc, style)).toBe(true);
+    const atEnd = page(844, { list: { scrollTop: 300 } });
+    expect(run(atEnd.button, 0, 100, atEnd.doc, style)).toBe(false);
+    expect(run(atEnd.button, 0, -100, atEnd.doc, style)).toBe(true);
+  });
+
+  it("does not count a page whose overflow is hidden, on html or on body", () => {
+    const viaHtml = page(1800, { html: { overflowY: "hidden" }, list: { scrollHeight: 300 } });
+    expect(run(viaHtml.button, 0, 100, viaHtml.doc, style)).toBe(false);
+    const viaBody = page(1800, { body: { overflowY: "hidden" }, list: { scrollHeight: 300 } });
+    expect(run(viaBody.button, 0, 100, viaBody.doc, style)).toBe(false);
+  });
+
+  const win = {} as unknown as MessageEventSource;
+  const frames = new Map([["ch1", { screen: "P02", window: () => win }]]);
+  const wheel = { channel: "ch1", type: "wheel", x: 10, y: 20, dx: 0, dy: -100, mode: 0, ctrl: true, meta: false, shift: false, alt: false };
+  it("accepts a wheel from the registered frame's own window, with its modifier keys", () => {
+    expect(acceptFrameWheel({ data: wheel, source: win }, frames)).toEqual({
+      channel: "ch1",
+      x: 10,
+      y: 20,
+      deltaX: 0,
+      deltaY: -100,
+      deltaMode: 0,
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+      altKey: false,
+    });
+    expect(acceptFrameWheel({ data: { ...wheel, ctrl: false, meta: true }, source: win }, frames)).toMatchObject({ ctrlKey: false, metaKey: true });
+  });
+  it("rejects a wheel from another window, an unknown frame, or with numbers missing", () => {
+    expect(acceptFrameWheel({ data: wheel, source: {} as MessageEventSource }, frames)).toBeUndefined();
+    expect(acceptFrameWheel({ data: { ...wheel, channel: "other" }, source: win }, frames)).toBeUndefined();
+    expect(acceptFrameWheel({ data: { ...wheel, dy: Number.NaN }, source: win }, frames)).toBeUndefined();
+    expect(acceptFrameWheel({ data: { ...wheel, x: "10" }, source: win }, frames)).toBeUndefined();
+    expect(acceptFrameWheel({ data: { ...wheel, type: "click" }, source: win }, frames)).toBeUndefined();
+  });
+  it("finds the same spot on the page from the frame's on-screen box", () => {
+    // A 390px-wide frame drawn 195px wide at (100, 50): frame px (200, 400) is page px (200, 250).
+    expect(frameToClient({ x: 200, y: 400 }, { left: 100, top: 50, width: 195 }, 390)).toEqual({ x: 200, y: 250 });
+  });
+});
+
 import { snapshotSvg } from "../web/src/screen-doc.ts";
 describe("snapshotSvg", () => {
   it("pins the cloned document to the frame's viewport size", () => {

@@ -22,7 +22,8 @@ export const LABEL_H = 46;
 export const NOTE_H = 44;
 const COL_GAP = 120;
 const STACK_GAP = 24;
-const LANE_PAD = 32;
+/** Padding inside a lane above and below its frames. */
+export const LANE_PAD = 32;
 const LANE_GAP = 56;
 const ORIGIN_X = 40;
 const ORIGIN_Y = 40;

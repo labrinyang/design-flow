@@ -61,8 +61,8 @@ body {
   cursor: crosshair;
 }
 [data-commenting="true"] [data-anchor]:not([data-anchor="edge"]):hover {
-  outline: 2px solid var(--yellow-500);
-  outline-offset: 2px;
+  outline: calc(2px * var(--df-chrome, 1)) solid var(--yellow-500);
+  outline-offset: calc(2px * var(--df-chrome, 1));
   border-radius: 6px;
 }
 /* An edge lights up along its own line, not inside a box. */
@@ -76,8 +76,17 @@ body {
 .df-marked [data-frame],
 .df-marked[data-anchor="lane"],
 .react-flow__node.df-marked > [data-anchor="lane"] {
-  outline: 2.5px solid var(--yellow-500);
-  outline-offset: 3px;
+  outline: calc(2.5px * var(--df-chrome, 1)) solid var(--yellow-500);
+  outline-offset: calc(3px * var(--df-chrome, 1));
+}
+/*
+ * Pins and the outlines above are drawn inside the zoomed canvas, with scales the canvas sets:
+ * --df-chrome follows the zoom up to 100% and keeps the 100% size past it; --df-pin also keeps
+ * pins readable when zoomed out (see zoom.ts).
+ */
+[data-pin] {
+  transform: scale(var(--df-pin, 1));
+  transform-origin: 50% 100%;
 }
 
 :root {
