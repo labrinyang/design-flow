@@ -80,7 +80,7 @@ The agent picks a feature name, runs `design-flow open sign-up`, and writes `.de
 ### 2. Read the canvas
 
 <p align="center">
-  <img src="docs/images/frames.png" alt="Close-up of the Sign in lane: Welcome, Sign in, Wrong password, Reset password and Link sent screens, each a real interface, connected by labelled arrows such as Forgot password and Sent link" width="960" />
+  <img src="docs/images/frames.png" alt="Close-up of the Sign in lane: Welcome, Sign in, Wrong password, Reset password and Link sent screens, each a real interface, connected by labelled arrows such as Forgot password and Send link" width="960" />
 </p>
 
 - **Lanes** group the flow (sign up, sign in, errors). An error lane marked "reachable from any step" holds interruptions that can happen anywhere.
