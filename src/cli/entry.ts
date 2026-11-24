@@ -4,6 +4,6 @@ import { runServer } from "../server/main.ts";
 // One file for everything: `design-flow __serve` starts the server (spawned detached by `open`).
 if (process.argv[2] === "__serve") await runServer();
 else {
-  process.exitCode = await main(process.argv.slice(2));
-  if (process.argv[2] !== "watch") process.exit(process.exitCode);
+  // Every command ends here, watch included (it returns on SIGTERM or SIGINT): exit even if a socket or timer is still open.
+  process.exit(await main(process.argv.slice(2)));
 }

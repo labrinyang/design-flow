@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,40 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const run = promisify(execFile);
 const BIN = join(import.meta.dirname, "..", "bin", "design-flow.js");
+// What the installed skill runs: the bundled launcher, a different build id from the dev build in dist/.
+const SKILL_BIN = join(import.meta.dirname, "..", "skills", "design-flow", "scripts", "design-flow.mjs");
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const bundledBuild = () => createHash("sha1").update(readFileSync(SKILL_BIN)).digest("hex").slice(0, 12);
+const serverInfo = (): { pid: number; port: number; build?: string } | undefined => {
+  try {
+    return JSON.parse(readFileSync(join(home, "server.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+};
+const healthy = (info?: { port: number }) =>
+  info ? fetch(`http://127.0.0.1:${info.port}/health`, { signal: AbortSignal.timeout(800) }).then((r) => r.ok, () => false) : Promise.resolve(false);
+async function until<T>(what: string, f: () => T | undefined | Promise<T | undefined>, ms = 10000): Promise<T> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await f();
+    if (v) return v;
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await sleep(50);
+  }
+}
+/** The running server's entry for `dir` once it is registered (registrations persist across servers in one home). */
+async function registeredOn(dir: string) {
+  const info = serverInfo();
+  if (!info) return undefined;
+  const list = await fetch(`http://127.0.0.1:${info.port}/api/projects`).then((r) => r.json() as Promise<{ dir: string; key: string }[]>, () => undefined);
+  return list?.find((p) => p.dir.endsWith(dir.split("/").pop()!));
+}
+const bundledUp = () =>
+  until("the bundled build to serve", async () => {
+    const i = serverInfo();
+    return i && i.build === bundledBuild() && (await healthy(i)) ? i : undefined;
+  });
 const home = mkdtempSync(join(tmpdir(), "df-cli-home-"));
 const env = { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_PORT: "0", DESIGN_FLOW_LOCALE: "en" };
 
@@ -39,7 +74,7 @@ edges:
 `;
 
 beforeAll(() => {
-  if (!existsSync(BIN)) throw new Error("run pnpm build first");
+  if (!existsSync(BIN) || !existsSync(SKILL_BIN)) throw new Error("run pnpm build first");
 });
 afterAll(async () => {
   await df(["stop"], tmpdir());
@@ -145,6 +180,81 @@ describe("design-flow CLI", () => {
     expect(lines[0]).toContain("[design-flow] pay");
     expect(lines[0]).toContain("Screen B Done");
   });
+
+  // On Windows kill() ends a process outright, so there is no handler to test.
+  it.skipIf(process.platform === "win32")("watch exits on SIGTERM and SIGINT, from the dev entry and the bundled skill", async () => {
+    expect((await df(["open", "pay", "--no-open"], project(FLOW))).code).toBe(0);
+    for (const [bin, signal] of [
+      [BIN, "SIGTERM"],
+      [BIN, "SIGINT"],
+      [SKILL_BIN, "SIGTERM"],
+      [SKILL_BIN, "SIGINT"],
+    ] as const) {
+      const dir = project(FLOW);
+      const child = spawn(process.execPath, [bin, "watch"], { cwd: dir, env, stdio: "ignore" });
+      const exited = new Promise((r) => child.once("exit", (code, sig) => r(code ?? sig)));
+      try {
+        // watch registers its directory only once its signal handlers are in place.
+        await until(`${bin} to register`, () => {
+          if (child.exitCode !== null || child.signalCode !== null) throw new Error(`${bin} exited before registering`);
+          return registeredOn(dir);
+        });
+        child.kill(signal);
+        expect(await Promise.race([exited, sleep(3000).then(() => "still running")]), `${bin} on ${signal}`).toBe(0);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    }
+  }, 30000);
+
+  it("a fresh watch replaces a server of another build, as open does", async () => {
+    const dir = project(FLOW);
+    expect((await df(["open", "pay", "--no-open"], dir)).code).toBe(0);
+    const dev = serverInfo()!;
+    expect(dev.build).not.toBe(bundledBuild());
+    const child = spawn(process.execPath, [SKILL_BIN, "watch"], { cwd: dir, env, stdio: "ignore" });
+    try {
+      expect((await bundledUp()).pid).not.toBe(dev.pid);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("a reconnecting watch attaches to whatever server is up and does not restart a stopped one", async () => {
+    const dir = project(FLOW);
+    const other = project(FLOW);
+    expect((await df(["open", "pay", "--no-open"], other)).code).toBe(0);
+    const child = spawn(process.execPath, [SKILL_BIN, "watch"], { cwd: dir, env });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    try {
+      // Its first connect puts its own build up; then the dev CLI's open brings a dev server back.
+      await bundledUp();
+      expect((await df(["open", "pay", "--no-open"], other)).code).toBe(0);
+      const dev = serverInfo()!;
+      expect(dev.build).not.toBe(bundledBuild());
+      // The watcher comes back to the dev server instead of replacing it: a comment posted there reaches it.
+      const p = await until("the watcher's project on the dev server", () => registeredOn(dir));
+      await fetch(`http://127.0.0.1:${dev.port}/api/projects/${p.key}/features/pay/comments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ anchor: { type: "screen", screen: "A", point: { x: 0, y: 0 } }, text: "Round the amount" }),
+      });
+      await until("the comment line", () => out.includes("Round the amount") || undefined);
+      expect(serverInfo()!.pid).toBe(dev.pid);
+      // After stop it waits instead of starting a server of its own, and says so once.
+      const errBefore = err.length;
+      expect((await df(["stop"], other)).out).toContain("Stopped.");
+      await sleep(3500);
+      expect(serverInfo()!.pid).toBe(dev.pid);
+      expect(await healthy(dev)).toBe(false);
+      expect(err.slice(errBefore).match(/no server running/g)).toHaveLength(1);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  }, 30000);
 });
 
 describe("template schema header", () => {

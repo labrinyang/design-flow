@@ -1,7 +1,7 @@
 [
   {
     "name": "design-flow-comments",
-    "command": "cd \"${CLAUDE_PROJECT_DIR}\" && node \"${CLAUDE_PLUGIN_ROOT}/skills/design-flow/scripts/design-flow.mjs\" watch",
+    "command": "exec node \"${CLAUDE_PLUGIN_ROOT}/skills/design-flow/scripts/design-flow.mjs\" watch --project-dir \"${CLAUDE_PROJECT_DIR}\"",
     "description": "Design Flow canvas comments and approvals",
     "when": "on-skill-invoke:design-flow"
   }

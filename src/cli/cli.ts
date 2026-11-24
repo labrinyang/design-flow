@@ -69,7 +69,10 @@ async function health(info?: ServerInfo): Promise<{ build?: string } | undefined
   if (!info) return undefined;
   try {
     const r = await fetch(`http://127.0.0.1:${info.port}/health`, { signal: AbortSignal.timeout(800) });
-    return r.ok ? ((await r.json()) as { build?: string }) : undefined;
+    if (!r.ok) return undefined;
+    const h = (await r.json()) as { app?: string; build?: string };
+    // The recorded port may belong to another program by now: only a design-flow server counts.
+    return h.app === "design-flow" ? h : undefined;
   } catch {
     return undefined;
   }
@@ -126,8 +129,9 @@ async function api(info: ServerInfo, path: string, init?: RequestInit) {
   return data;
 }
 
-async function register(dir: string) {
-  const info = await ensureServer();
+/** Registers `dir` with `server`, or with the server ensureServer starts or replaces. */
+async function register(dir: string, server?: ServerInfo) {
+  const info = server ?? (await ensureServer());
   const { key } = await api(info, "/api/projects", { method: "POST", body: JSON.stringify({ dir }) });
   return { info, key: key as string };
 }
@@ -305,17 +309,41 @@ async function notify(dir: string, f: string) {
 
 function watchEvents(dir: string): Promise<number> {
   return new Promise((resolveExit) => {
+    let stopped = false;
+    let first = true;
+    let waiting = false;
+    let socket: WebSocket | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const again = (ms: number) => {
+      if (!stopped) retry = setTimeout(connect, ms);
+    };
     const connect = async () => {
       let info: ServerInfo;
       let key: string;
       try {
-        ({ info, key } = await register(dir));
+        // The first connect starts or replaces the server, as open does. A reconnect only attaches to whatever server is
+        // up: a watcher left running across an update or a `stop` must not start its own build again. Waiting loses
+        // nothing, because the server replays undelivered comments when a watcher connects.
+        const running = first ? undefined : await runningServer();
+        if (!first && !running) {
+          if (stopped) return;
+          if (!waiting) console.error("design-flow watch: no server running; waiting for one (design-flow open starts it)");
+          waiting = true;
+          again(1500);
+          return;
+        }
+        ({ info, key } = await register(dir, running));
       } catch (e) {
+        if (stopped) return;
         console.error(`design-flow watch: ${(e as Error).message}; retrying`);
-        setTimeout(connect, 3000);
+        again(3000);
         return;
       }
+      if (stopped) return;
+      first = false;
+      waiting = false;
       const ws = new WebSocket(`ws://127.0.0.1:${info.port}/events?project=${key}`);
+      socket = ws;
       ws.on("message", (data) => {
         const m = JSON.parse(String(data));
         if (m.type === "comment")
@@ -325,12 +353,21 @@ function watchEvents(dir: string): Promise<number> {
         else if (m.type === "approved")
           console.log(`[design-flow] ${m.feature} · APPROVED (flow.yaml ${String(m.sha256).slice(0, 8)}) — you may start coding this feature.`);
       });
-      ws.on("close", () => setTimeout(connect, 1500));
+      ws.on("close", () => again(1500));
       ws.on("error", () => {});
     };
+    // SIGTERM or SIGINT ends the watch for good: no reconnect, and no socket or timer left to keep the process alive.
+    const stop = () => {
+      stopped = true;
+      clearTimeout(retry);
+      socket?.terminate();
+      process.off("SIGTERM", stop);
+      process.off("SIGINT", stop);
+      resolveExit(0);
+    };
+    process.on("SIGTERM", stop);
+    process.on("SIGINT", stop);
     void connect();
-    process.on("SIGTERM", () => resolveExit(0));
-    process.on("SIGINT", () => resolveExit(0));
   });
 }
 

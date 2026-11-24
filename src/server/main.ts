@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_PORT, startServer } from "./server.ts";
 
+declare const __DESIGN_FLOW_BUNDLE__: boolean | undefined;
+
 const home = process.env.DESIGN_FLOW_HOME ?? join(homedir(), ".design-flow");
 mkdirSync(home, { recursive: true });
 const log = (m: string) => appendFileSync(join(home, "server.log"), `${new Date().toISOString()} ${m}\n`);
@@ -28,4 +30,6 @@ export function runServer(): Promise<void> {
 );
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) void runServer();
+// Dev build: `node dist/src/server/main.js` starts the server. Not in the bundled skill, where every module shares the
+// launcher's import.meta.url and this would start a server inside every command; there entry.ts starts it for `__serve`.
+if (typeof __DESIGN_FLOW_BUNDLE__ === "undefined" && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) void runServer();
