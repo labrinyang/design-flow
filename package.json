@@ -17,7 +17,7 @@
     "build:cli": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@astrafoundry/design": "0.2.0",
+    "@astrafoundry/design": "0.2.1",
     "@fontsource/fraunces": "^5.3.0",
     "@fontsource/ibm-plex-sans": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
