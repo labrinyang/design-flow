@@ -4,9 +4,12 @@ import { join } from "node:path";
 import { CommentStore } from "./comments.ts";
 
 export type Status = "draft" | "approved" | "stale";
-interface Approval {
+export interface Approval {
   sha256: string;
   at: string;
+  /** The agent was shown this approval, by `status` or the prompt hook. */
+  seen?: boolean;
+  /** Written by versions before `seen`. */
   delivered?: boolean;
 }
 
@@ -42,10 +45,21 @@ export function approvalStatus(dir: string): { status: Status; openThreads: numb
   return { status, openThreads, approvedAt: a.at };
 }
 
-/** The approval the agent has not been told about yet, marked delivered. */
-export function takeApprovalEvent(dir: string): Approval | undefined {
+/**
+ * The approval the agent has not been shown, while it still covers the spec as it is. An older file's
+ * `delivered` counts as shown: unlike a comment, an approval loses nothing when its notice is missed,
+ * because `status` always reports it.
+ */
+export function unseenApproval(dir: string): Approval | undefined {
   const a = read(dir);
-  if (!a || a.delivered) return undefined;
-  writeFileSync(approvalFile(dir), JSON.stringify({ ...a, delivered: true }, null, 2) + "\n");
+  if (!a || (a.seen ?? a.delivered) || !existsSync(join(dir, "flow.yaml")) || a.sha256 !== hashSpec(dir)) return undefined;
   return a;
+}
+
+/** Record that the agent was shown approval `a`. A newer approval stays unseen. */
+export function markApprovalSeen(dir: string, a: Approval) {
+  const cur = read(dir);
+  if (!cur || cur.at !== a.at || cur.sha256 !== a.sha256) return;
+  const { delivered: _old, ...rest } = cur;
+  writeFileSync(approvalFile(dir), JSON.stringify({ ...rest, seen: true }, null, 2) + "\n");
 }

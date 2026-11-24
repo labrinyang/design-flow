@@ -4,8 +4,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { approvalStatus } from "../core/approval.ts";
-import { CommentStore, describeAnchor, type Locale } from "../core/comments.ts";
+import { approvalStatus, markApprovalSeen, unseenApproval } from "../core/approval.ts";
+import { CommentStore, describeAnchor, messageText, optionLetter, seenCount, type Locale, type Offer, type Thread } from "../core/comments.ts";
 import { parseFlow } from "../core/flow.ts";
 import { checkPrototype, readPrototype } from "../core/prototype.ts";
 import { BUILD, DEFAULT_PORT, projectKey, VERSION } from "../server/server.ts";
@@ -20,19 +20,52 @@ const locale = (): Locale =>
 interface Args {
   _: string[];
   flags: Record<string, string | boolean>;
+  /** Flags that may repeat, in order. */
+  lists: Record<string, string[]>;
 }
+/** Flags that take a value, as `--flag value` or `--flag=value`. */
+const VALUE_FLAGS = ["text", "project-dir", "option", "recommend", "applied"];
+const LIST_FLAGS = ["option"];
 function parseArgs(argv: string[]): Args {
-  const out: Args = { _: [], flags: {} };
+  const out: Args = { _: [], flags: {}, lists: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a.startsWith("--")) {
-      const [k, v] = a.slice(2).split("=", 2);
-      if (v !== undefined) out.flags[k] = v;
-      else if (argv[i + 1] && !argv[i + 1].startsWith("--") && ["text", "project-dir"].includes(k)) out.flags[k] = argv[++i];
-      else out.flags[k] = true;
-    } else out._.push(a);
+    if (!a.startsWith("--")) {
+      out._.push(a);
+      continue;
+    }
+    const eq = a.indexOf("=");
+    const k = eq < 0 ? a.slice(2) : a.slice(2, eq);
+    let v: string | boolean = eq < 0 ? true : a.slice(eq + 1);
+    if (v === true && VALUE_FLAGS.includes(k) && argv[i + 1] !== undefined && !argv[i + 1].startsWith("--")) v = argv[++i];
+    if (!LIST_FLAGS.includes(k)) out.flags[k] = v;
+    else if (typeof v === "string") (out.lists[k] ??= []).push(v);
+    else throw new UsageError(`--${k} needs a value`);
   }
   return out;
+}
+
+/** An option named by its letter (A) or its number (1), as an index. */
+function optionIndex(a: Args, flag: string, count: number): number | undefined {
+  const v = a.flags[flag];
+  if (v === undefined) return undefined;
+  const s = typeof v === "string" ? v.trim().toUpperCase() : "";
+  const i = /^[A-Z]$/.test(s) ? s.charCodeAt(0) - 65 : /^\d+$/.test(s) ? Number(s) - 1 : -1;
+  if (!count) throw new UsageError(`--${flag} names one of the options; give them with --option`);
+  if (i < 0 || i >= count) throw new UsageError(`--${flag} takes the letter (A to ${optionLetter(count - 1)}) or the number (1 to ${count}) of an option`);
+  return i;
+}
+
+/** A thread as the agent reads it: messages marked (new) when unread, and each offer's options. */
+function printThread(t: Thread, where: string, fresh: Set<string>) {
+  console.log(`#${t.id} [${t.status}] ${where}`);
+  for (const m of t.messages) {
+    console.log(`  ${m.author === "agent" ? "agent" : "user "}${fresh.has(m.id) ? " (new)" : ""}: ${messageText(t, m)}`);
+    m.options?.forEach((o, i) => {
+      const marks = [i === m.recommended ? "recommended" : "", i === m.applied ? "applied" : ""].filter(Boolean);
+      console.log(`    ${optionLetter(i)}. ${o}${marks.length ? ` (${marks.join(", ")})` : ""}`);
+    });
+  }
 }
 
 class UsageError extends Error {}
@@ -164,11 +197,12 @@ Usage: design-flow <command> [feature] [options]
   open <feature> [--no-open]       Start the server, create flow.yaml if missing, open the canvas
   check <feature>                  Validate flow.yaml (exit 0 clean, 3 issues)
   comments <feature> [--unread] [--json]
-                                   Show comment threads; marks them delivered
-  reply <feature> <thread> --text  Reply as the agent
-  resolve <feature> <thread>       Resolve a thread
-  status <feature>                 draft | approved | stale, and open threads
-  watch                            Print one line per new comment or approval
+                                   Show comment threads; what it shows counts as read
+  reply <feature> <thread> --text <text> [--option <text>]... [--recommend <A>] [--applied <A>]
+                                   Reply as the agent; with 2 to 4 options the user picks one with a click
+  resolve <feature> <thread>       Resolve a thread you have read to the end
+  status <feature>                 draft | approved | stale, open and unread threads
+  watch                            Print one line per new comment or approval; read them with comments
   list                             List features in this project
   stop                             Stop the server
   hook                             Claude Code UserPromptSubmit hook
@@ -177,10 +211,10 @@ Options: --project-dir <path> (default: current directory)
 `;
 
 export async function main(argv: string[]): Promise<number> {
-  const a = parseArgs(argv);
-  const cmd = a._[0];
-  const dir = projectDir(a);
   try {
+    const a = parseArgs(argv);
+    const cmd = a._[0];
+    const dir = projectDir(a);
     switch (cmd) {
       case "open": {
         const f = feature(a);
@@ -210,49 +244,80 @@ export async function main(argv: string[]): Promise<number> {
         const fd = requireFeature(dir, f);
         const flow = parseFlow(readFileSync(join(fd, "flow.yaml"), "utf8"), "").flow;
         const store = CommentStore.load(fd);
-        const fresh = new Set(store.takeUndelivered().map((d) => d.messageId));
+        const fresh = new Set(store.unread().map((d) => d.messageId));
         const threads = store.threads.filter((t) => !a.flags.unread || t.messages.some((m) => fresh.has(m.id)));
         const loc = locale();
-        if (a.flags.json) {
+        const where = (t: Thread) => (flow ? describeAnchor(t.anchor, flow, loc) : "");
+        if (a.flags.json)
           console.log(
             JSON.stringify(
-              threads.map((t) => ({ ...t, where: flow ? describeAnchor(t.anchor, flow, loc) : "", unread: t.messages.some((m) => fresh.has(m.id)) })),
+              threads.map((t) => ({ ...t, seen: seenCount(t), where: where(t), unread: t.messages.some((m) => fresh.has(m.id)) })),
               null,
               2,
             ),
           );
-          return 0;
+        else {
+          if (!threads.length) console.log(a.flags.unread ? "No unread comments." : "No comments.");
+          for (const t of threads) printThread(t, where(t), fresh);
         }
-        if (!threads.length) console.log(a.flags.unread ? "No unread comments." : "No comments.");
-        for (const t of threads) {
-          console.log(`#${t.id} [${t.status}] ${flow ? describeAnchor(t.anchor, flow, loc) : ""}`);
-          for (const m of t.messages) console.log(`  ${m.author === "agent" ? "agent" : "user "}${fresh.has(m.id) ? " (new)" : ""}: ${m.text}`);
-        }
+        // Printed, so read: only now, so that a run that dies first leaves them unread.
+        store.markRead(threads.map((t) => t.id));
         return 0;
       }
       case "reply": {
         const f = feature(a);
         const id = a._[2];
         const text = a.flags.text;
-        if (!id || typeof text !== "string" || !text.trim()) throw new UsageError("usage: design-flow reply <feature> <thread> --text <text>");
-        CommentStore.load(requireFeature(dir, f)).reply(id, "agent", text.trim());
+        if (!id || typeof text !== "string" || !text.trim())
+          throw new UsageError("usage: design-flow reply <feature> <thread> --text <text> [--option <text>]... [--recommend <A>] [--applied <A>]");
+        const options = a.lists.option ?? [];
+        if (options.length === 1 || options.length > 4) throw new UsageError("offer two to four options, or none");
+        const recommended = optionIndex(a, "recommend", options.length);
+        const applied = optionIndex(a, "applied", options.length);
+        if (options.length && recommended === undefined && applied === undefined)
+          throw new UsageError("with options, say which one you recommend (--recommend) or have applied (--applied)");
+        const offer: Offer | undefined = options.length ? { options, recommended, applied } : undefined;
+        const store = CommentStore.load(requireFeature(dir, f));
+        store.reply(id, "agent", text.trim(), offer);
         await notify(dir, f);
         console.log(`Replied to #${id}.`);
+        // What the user added that the agent had not read: it reads it here, with its reply.
+        const missed = store.unread().filter((d) => d.threadId === id);
+        if (missed.length) {
+          console.log("Before your reply the user also wrote, unread until now:");
+          for (const d of missed) console.log(`  user: ${d.text}`);
+        }
+        store.markRead([id]);
         return 0;
       }
       case "resolve": {
         const f = feature(a);
         const id = a._[2];
         if (!id) throw new UsageError("usage: design-flow resolve <feature> <thread>");
-        CommentStore.load(requireFeature(dir, f)).resolve(id);
+        const store = CommentStore.load(requireFeature(dir, f));
+        const missed = store.resolveIfRead(id);
+        if (missed.length) {
+          console.log(`Not resolved: the user wrote on #${id} after you last read it:`);
+          for (const d of missed) console.log(`  user: ${d.text}`);
+          console.log("Answer it, or run resolve again if it needs nothing more.");
+          store.markRead([id]);
+          return 1;
+        }
         await notify(dir, f);
         console.log(`Resolved #${id}.`);
         return 0;
       }
       case "status": {
         const f = feature(a);
-        const s = approvalStatus(requireFeature(dir, f));
-        console.log(`${s.status} · ${s.openThreads} open thread${s.openThreads === 1 ? "" : "s"}${s.approvedAt ? ` · approved ${s.approvedAt}` : ""}`);
+        const fd = requireFeature(dir, f);
+        const s = approvalStatus(fd);
+        const unread = new Set(CommentStore.load(fd).unread().map((d) => d.threadId)).size;
+        console.log(
+          `${s.status} · ${s.openThreads} open thread${s.openThreads === 1 ? "" : "s"}${unread ? ` (${unread} unread)` : ""}${s.approvedAt ? ` · approved ${s.approvedAt}` : ""}`,
+        );
+        // The agent has now been told of the approval.
+        const shown = unseenApproval(fd);
+        if (shown) markApprovalSeen(fd, shown);
         return 0;
       }
       case "list": {
@@ -262,7 +327,8 @@ export async function main(argv: string[]): Promise<number> {
         if (!names.length) console.log("No features yet. Start one with: design-flow open <feature>");
         for (const n of names.sort()) {
           const s = approvalStatus(join(root, n));
-          console.log(`${n}\t${s.status}\t${s.openThreads} open`);
+          const unread = new Set(CommentStore.load(join(root, n)).unread().map((d) => d.threadId)).size;
+          console.log(`${n}\t${s.status}\t${s.openThreads} open${unread ? `\t${unread} unread` : ""}`);
         }
         return 0;
       }
@@ -323,7 +389,7 @@ function watchEvents(dir: string): Promise<number> {
       try {
         // The first connect starts or replaces the server, as open does. A reconnect only attaches to whatever server is
         // up: a watcher left running across an update or a `stop` must not start its own build again. Waiting loses
-        // nothing, because the server replays undelivered comments when a watcher connects.
+        // nothing, because the server replays unread comments when a watcher connects.
         const running = first ? undefined : await runningServer();
         if (!first && !running) {
           if (stopped) return;

@@ -7,8 +7,8 @@ import { promisify } from "node:util";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import { approvalStatus, approve, hashFlow, hashSpec, takeApprovalEvent } from "../core/approval.ts";
-import { CommentStore, describeAnchor, isOrphan, type Anchor, type Locale } from "../core/comments.ts";
+import { approvalStatus, approve, hashFlow, hashSpec, unseenApproval } from "../core/approval.ts";
+import { CommentStore, describeAnchor, isOrphan, seenCount, type Anchor, type Locale } from "../core/comments.ts";
 import { parseFlow, type Flow, type Issue } from "../core/flow.ts";
 import { layoutFlow, type Overrides } from "../core/layout.ts";
 import { applyPrototype, checkPrototype, readPrototype } from "../core/prototype.ts";
@@ -201,6 +201,7 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     const layout = flow ? await layoutFlow(flow, overrides) : undefined;
     const threads = CommentStore.load(dir).threads.map((t) => ({
       ...t,
+      seen: seenCount(t),
       where: flow ? describeAnchor(t.anchor, flow, locale) : "",
       orphan: flow ? isOrphan(t.anchor, flow) : false,
     }));
@@ -258,25 +259,38 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     }
   }
 
-  /** Hand undelivered user messages and approvals to the first connected agent socket. */
+  /** What each events socket has been sent, by key, so a watcher hears of each message once per connection. */
+  const pushed = new WeakMap<WebSocket, Set<string>>();
+
+  /**
+   * Ring the agent's watchers: send each one the unread comments and the unseen approval it has not been sent
+   * yet. Sending marks nothing read, since a watcher's output may reach no agent (a plain background shell
+   * reports only when it exits); what counts is the text `comments` or the prompt hook prints to the agent.
+   * So a watcher that connects again hears of whatever is still unread.
+   */
   function deliver(p: Project) {
     const socks = [...(eventSockets.get(p.key) ?? [])].filter((s) => s.readyState === s.OPEN);
     if (!socks.length) return;
     for (const f of featureNames(p)) {
       const dir = featureDir(p, f);
       const flow = p.lastValid.get(f) ?? parseFlow(readFileSync(join(dir, "flow.yaml"), "utf8"), "").flow;
-      for (const d of CommentStore.load(dir).takeUndelivered())
-        for (const ws of socks)
-          send(ws, {
-            type: "comment",
-            feature: f,
-            thread: d.threadId,
-            first: d.first,
-            text: d.text,
-            where: flow ? describeAnchor(d.anchor, flow, locale) : "",
-          });
-      const a = takeApprovalEvent(dir);
-      if (a) for (const ws of socks) send(ws, { type: "approved", feature: f, sha256: a.sha256, at: a.at });
+      const events: [key: string, message: unknown][] = CommentStore.load(dir)
+        .unread()
+        .map((d) => [
+          `${f}/${d.threadId}/${d.messageId}`,
+          { type: "comment", feature: f, thread: d.threadId, first: d.first, text: d.text, where: flow ? describeAnchor(d.anchor, flow, locale) : "" },
+        ]);
+      const a = unseenApproval(dir);
+      if (a) events.push([`${f}/approval/${a.at}`, { type: "approved", feature: f, sha256: a.sha256, at: a.at }]);
+      for (const ws of socks) {
+        let sent = pushed.get(ws);
+        if (!sent) pushed.set(ws, (sent = new Set()));
+        for (const [k, m] of events)
+          if (!sent.has(k)) {
+            sent.add(k);
+            send(ws, m);
+          }
+      }
     }
   }
 
@@ -387,16 +401,17 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       CommentStore.load(dir).addThread(b.anchor, b.text.trim());
     } else if (action === "threads" && parts[5] && m === "POST") {
       const op = parts[6];
-      const b = op === "reply" ? await body(req) : {};
+      const b = op === "reply" || op === "pick" ? await body(req) : {};
       const s = CommentStore.load(dir);
       try {
         if (op === "reply") s.reply(parts[5], b.author === "agent" ? "agent" : "user", String(b.text ?? ""));
+        else if (op === "pick") s.pick(parts[5], String(b.message ?? ""), Number(b.option));
         else if (op === "resolve") s.resolve(parts[5]);
         else if (op === "reopen") s.reopen(parts[5]);
         else throw new HttpError(404, "not found");
       } catch (e) {
         if (e instanceof HttpError) throw e;
-        throw new HttpError(404, (e as Error).message);
+        throw new HttpError(e instanceof RangeError ? 400 : 404, (e as Error).message);
       }
     } else throw new HttpError(404, "not found");
     onChange(p, f);

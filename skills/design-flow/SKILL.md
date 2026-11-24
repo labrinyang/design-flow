@@ -21,19 +21,31 @@ Run it from the project root (or pass `--project-dir <path>`). One local server 
 
 1. Pick a feature name: lowercase letters, digits, hyphens (`checkout`, `sign-up`).
 2. Run `design-flow open <feature>`. It creates a commented template if the file is missing, starts the local server, opens the browser and prints the canvas URL and the check result.
-3. Start `design-flow watch` as a **background** task (your harness's background shell or monitor). It prints one `[design-flow]` line per new comment or approval, so feedback reaches you without the user typing it. If you cannot run background tasks, run `design-flow comments <feature> --unread` whenever the user says they commented.
+3. Start `design-flow watch` as a **background** task that hands you each line as it is printed (in Claude Code, the Monitor tool; a background shell reports only when it exits). It prints one `[design-flow]` line per new comment or approval, so feedback reaches you without the user typing it. A line only rings the bell: a comment counts as read once `design-flow comments` has shown it to you, and the canvas tells the user whether you have. If you cannot run background tasks, run `design-flow comments <feature> --unread` whenever the user says they commented.
 4. Write `flow.yaml` (the map: lanes, screens, arrows) and `prototype.html` (the screens themselves, as one working page). References below. Draw **every** screen, every branch, every error and interruption, and every way back. A missing line is the most common review comment.
 5. Run `design-flow check <feature>`. It checks both files against each other. Fix every issue it prints (file:line:col and a fix). The canvas keeps showing the last valid version while the file is broken.
 6. Tell the user, in one line, that the canvas is ready, with the URL `open` printed, and that they can press **C** to comment and **Approve** when it is right. Then wait.
 7. For each comment:
    - run `design-flow comments <feature>` to read the thread and where it is anchored,
-   - change `flow.yaml`, run `check`,
-   - `design-flow reply <feature> <thread> --text "<what you changed>"`,
-   - `design-flow resolve <feature> <thread>` when it is settled.
+   - decide how to answer it (see **Answering a comment**), change `flow.yaml` and `prototype.html` as that calls for, run `check`,
+   - `design-flow reply <feature> <thread> --text "<what you changed>"`, with options when the answer calls for them,
+   - `design-flow resolve <feature> <thread>` when it is settled. It refuses while the thread holds a message you have not read, and shows it to you.
+
+   A pick arrives like any reply, as `picked B: <the option>`. Apply it, reply with what changed, resolve.
 8. **Do not write code for this feature until `design-flow status <feature>` prints `approved`.** Approval arrives as a `[design-flow] … APPROVED` line. Changing `flow.yaml` after approval makes it `stale`; ask for approval again.
 9. Build from the approved flow. Screen ids (`P03`) are the names to use when you talk about screens.
 
 Do not edit `layout.json`, `comments.json`, `approval.json` or `.last-valid.yaml`; the tool owns them. Approval covers `flow.yaml` and `prototype.html` together: changing either makes it `stale`.
+
+## Answering a comment
+
+Decide by who holds what the choice depends on:
+
+1. **Just do it.** The comment, the user's earlier answers, the existing screens or plain facts settle it. Make the change and reply with what changed in a sentence or two. Most comments are this.
+2. **Do it, and offer the other way.** You would choose one way, but someone with the user's taste could reasonably choose another, and the two look different on the canvas. Apply yours, then reply with both, yours marked applied: `--option "<yours>" --option "<the other>" --applied A`. Say in the text when the other is better. The user switches with one click, or does nothing.
+3. **Ask.** The choice turns on something only the user knows (a business rule, a priority, a preference they have not stated), or it would be costly to undo. Change nothing; reply with two or three options and your recommendation: `--option "…" --option "…" --recommend A`, with what each trades in the text.
+
+Always recommend one, when you ask too. Options must differ in what the user would see or do; details you can settle yourself (spacing, wording, which icon) are yours to decide. Give two to four, best two or three, each a short label. If you offer options on most comments, you are asking about what case 1 covers. If the user often picks the option you did not recommend, your sense of their taste is off: where you would have just done it, offer the other way too.
 
 ## prototype.html
 
@@ -129,8 +141,8 @@ Layout is automatic: lanes are rows, the flow runs left to right, branches of on
 | --- | --- |
 | `design-flow open <feature> [--no-open]` | Start server, create template, open canvas |
 | `design-flow check <feature>` | Validate; exit 0 clean, 3 issues |
-| `design-flow comments <feature> [--unread] [--json]` | Threads with anchors; marks them delivered |
-| `design-flow reply <feature> <thread> --text "…"` | Reply as the agent |
-| `design-flow resolve <feature> <thread>` | Resolve a thread |
-| `design-flow status <feature>` | `draft`, `approved` or `stale`, and open threads |
+| `design-flow comments <feature> [--unread] [--json]` | Threads with anchors; what it shows counts as read |
+| `design-flow reply <feature> <thread> --text "…" [--option "…"]… [--recommend A] [--applied A]` | Reply as the agent, with options the user picks with one click |
+| `design-flow resolve <feature> <thread>` | Resolve a thread you have read to the end |
+| `design-flow status <feature>` | `draft`, `approved` or `stale`, open and unread threads |
 | `design-flow list` | Features in this project |

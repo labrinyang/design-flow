@@ -81,26 +81,63 @@ describe("server", () => {
     expect(res.status).toBe(400);
   });
 
-  it("delivers a new comment to the events socket exactly once", async () => {
+  it("sends a watcher each unread comment once, sends it again to a new watcher, and stops once the agent read it", async () => {
     const { base } = await boot();
     const dir = project();
     const { key } = await json(await post(`${base}/api/projects`, { dir }));
-    const ws = new WebSocket(`${base.replace("http", "ws")}/events?project=${key}`);
-    await new Promise((r) => ws.on("open", r));
-    const got = nextMessage(ws, (m) => m.type === "comment");
+    const events = () => {
+      const ws = new WebSocket(`${base.replace("http", "ws")}/events?project=${key}`);
+      const got: any[] = [];
+      ws.on("message", (d) => got.push(JSON.parse(String(d))));
+      return { ws, got, open: new Promise((r) => ws.on("open", r)) };
+    };
+    const one = events();
+    await one.open;
+    const first = nextMessage(one.ws, (m) => m.type === "comment");
     await json(
       await post(`${base}/api/projects/${key}/features/demo/comments`, {
         anchor: { type: "screen", screen: "A", point: { x: 1, y: 2 } },
         text: "Needs a back button",
       }),
     );
-    const m = await got;
-    expect(m).toMatchObject({ feature: "demo", text: "Needs a back button", where: "Screen A Alpha" });
-    const ws2 = new WebSocket(`${base.replace("http", "ws")}/events?project=${key}`);
-    const extra = nextMessage(ws2, (x) => x.type === "comment", 600).catch(() => "none");
-    expect(await extra).toBe("none");
-    ws.close();
-    ws2.close();
+    expect(await first).toMatchObject({ feature: "demo", text: "Needs a back button", where: "Screen A Alpha" });
+    // Unrelated changes ring again, but a connection hears of each message once.
+    writeFileSync(join(dir, ".design-flow", "demo", "layout.json"), "{}");
+    await new Promise((r) => setTimeout(r, 400));
+    expect(one.got.filter((m) => m.type === "comment")).toHaveLength(1);
+    // Sending it was not reading it: a watcher that connects now is told too.
+    const two = events();
+    await nextMessage(two.ws, (m) => m.type === "comment" && m.text === "Needs a back button");
+    const threads = JSON.parse(readFileSync(join(dir, ".design-flow", "demo", "comments.json"), "utf8")).threads;
+    expect(threads[0].seen).toBe(0);
+    // Once the agent has read it, nobody is told again.
+    const { CommentStore } = await import("../src/core/comments.ts");
+    const store = CommentStore.load(join(dir, ".design-flow", "demo"));
+    store.markRead([threads[0].id]);
+    const three = events();
+    await three.open;
+    await new Promise((r) => setTimeout(r, 400));
+    expect(three.got.filter((m) => m.type === "comment")).toEqual([]);
+    for (const e of [one, two, three]) e.ws.close();
+  });
+
+  it("records a pick of an agent's option as the user's reply, and reports what the agent has read", async () => {
+    const { base } = await boot();
+    const dir = project();
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const f = `${base}/api/projects/${key}/features/demo`;
+    const s0 = await json(await post(`${f}/comments`, { anchor: { type: "screen", screen: "A", point: { x: 1, y: 2 } }, text: "Claim where?" }));
+    const id = s0.threads[0].id;
+    expect(s0.threads[0].seen).toBe(0);
+    const { CommentStore } = await import("../src/core/comments.ts");
+    const store = CommentStore.load(join(dir, ".design-flow", "demo"));
+    store.markRead([id]);
+    const offer = store.reply(id, "agent", "Two ways", { options: ["One for the LP", "One per reward"], recommended: 0 });
+    expect((await post(`${f}/threads/${id}/pick`, { message: offer.id, option: 5 })).status).toBe(400);
+    expect((await post(`${f}/threads/${id}/pick`, { message: "nope", option: 0 })).status).toBe(400);
+    const s1 = await json(await post(`${f}/threads/${id}/pick`, { message: offer.id, option: 1 }));
+    expect(s1.threads[0].messages.at(-1)).toMatchObject({ author: "user", text: "One per reward", pick: { message: offer.id, option: 1 } });
+    expect(s1.threads[0].seen).toBe(1);
   });
 
   it("pushes an update to the feature socket when flow.yaml changes", async () => {

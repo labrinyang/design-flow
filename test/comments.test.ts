@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CommentStore, describeAnchor, isOrphan, type Anchor } from "../src/core/comments.ts";
+import { CommentStore, describeAnchor, isOrphan, seenCount, type Anchor } from "../src/core/comments.ts";
 import { parseFlow, type Flow } from "../src/core/flow.ts";
 
 const flow = parseFlow(
@@ -69,17 +69,93 @@ describe("CommentStore", () => {
     expect(again.threads[0].status).toBe("open");
   });
 
-  it("delivers each user message to the agent exactly once", () => {
+  it("keeps a user message unread until it is marked read, however often it is listed", () => {
     const dir = tmp();
     const s = CommentStore.load(dir);
     const t = s.addThread({ type: "canvas", point: pt }, "first");
+    expect(s.unread().map((m) => m.text)).toEqual(["first"]);
+    expect(CommentStore.load(dir).unread().map((m) => m.text)).toEqual(["first"]);
+    s.markRead([t.id]);
+    expect(CommentStore.load(dir).unread()).toEqual([]);
     s.reply(t.id, "agent", "ok");
-    expect(s.takeUndelivered().map((m) => m.text)).toEqual(["first"]);
-    expect(s.takeUndelivered()).toEqual([]);
     s.reply(t.id, "user", "second");
     const reloaded = CommentStore.load(dir);
-    expect(reloaded.takeUndelivered().map((m) => [m.threadId, m.text])).toEqual([[t.id, "second"]]);
-    expect(CommentStore.load(dir).takeUndelivered()).toEqual([]);
+    expect(reloaded.unread().map((m) => [m.threadId, m.text, m.first])).toEqual([[t.id, "second", false]]);
+    reloaded.markRead([t.id]);
+    expect(CommentStore.load(dir).unread()).toEqual([]);
+    expect(CommentStore.load(dir).threads[0].seen).toBe(3);
+  });
+
+  it("has nothing unread in a resolved thread, and the unread messages back when it reopens", () => {
+    const dir = tmp();
+    const s = CommentStore.load(dir);
+    const t = s.addThread({ type: "canvas", point: pt }, "first");
+    s.resolve(t.id);
+    expect(s.unread()).toEqual([]);
+    s.reopen(t.id);
+    expect(s.unread().map((m) => m.text)).toEqual(["first"]);
+  });
+
+  it("reads files from before read tracking: resolved threads as read, open ones up to the agent's last reply", () => {
+    const dir = tmp();
+    const m = (id: string, author: "user" | "agent", delivered = true) => ({ id, author, text: id, at: "2026-01-01T00:00:00.000Z", delivered });
+    const threads = [
+      { id: "aaaaaaaa", anchor: { type: "canvas", point: pt }, status: "open", createdAt: "x", messages: [m("u1", "user")] },
+      { id: "bbbbbbbb", anchor: { type: "canvas", point: pt }, status: "open", createdAt: "x", messages: [m("u2", "user"), m("a2", "agent"), m("u3", "user")] },
+      { id: "cccccccc", anchor: { type: "canvas", point: pt }, status: "resolved", createdAt: "x", messages: [m("u4", "user")] },
+    ];
+    writeFileSync(join(dir, "comments.json"), JSON.stringify({ version: 1, threads }));
+    const s = CommentStore.load(dir);
+    expect(s.threads.map(seenCount)).toEqual([0, 2, 1]);
+    // delivered: true meant "sent to a watcher", which proves nothing was read.
+    expect(s.unread().map((x) => x.text)).toEqual(["u1", "u3"]);
+    s.markRead(["aaaaaaaa"]);
+    const saved = JSON.parse(readFileSync(join(dir, "comments.json"), "utf8")).threads;
+    expect(saved[0].seen).toBe(1);
+    expect(saved.flatMap((t: { messages: object[] }) => t.messages).some((x: object) => "delivered" in x)).toBe(false);
+    expect(CommentStore.load(dir).unread().map((x) => x.text)).toEqual(["u3"]);
+  });
+
+  it("stores an agent's options and the user's pick, which reads as the option it names", () => {
+    const dir = tmp();
+    const s = CommentStore.load(dir);
+    const t = s.addThread({ type: "canvas", point: pt }, "Where does Claim go?");
+    s.markRead([t.id]);
+    const offer = s.reply(t.id, "agent", "Two ways:", { options: ["One Claim for the LP", "A Claim per reward"], recommended: 0 });
+    expect(CommentStore.load(dir).threads[0].messages[1]).toMatchObject({ options: ["One Claim for the LP", "A Claim per reward"], recommended: 0 });
+    s.resolve(t.id);
+    s.pick(t.id, offer.id, 1);
+    const again = CommentStore.load(dir);
+    expect(again.threads[0].status).toBe("open");
+    expect(again.threads[0].messages[2]).toMatchObject({ author: "user", text: "A Claim per reward", pick: { message: offer.id, option: 1 } });
+    expect(again.unread().map((x) => x.text)).toEqual(["picked B: A Claim per reward"]);
+  });
+
+  it("rejects bad offers and picks", () => {
+    const dir = tmp();
+    const s = CommentStore.load(dir);
+    const t = s.addThread({ type: "canvas", point: pt }, "x");
+    expect(() => s.reply(t.id, "agent", "?", { options: ["only one"], recommended: 0 })).toThrow(RangeError);
+    expect(() => s.reply(t.id, "agent", "?", { options: ["a", "b", "c", "d", "e"], recommended: 0 })).toThrow(RangeError);
+    expect(() => s.reply(t.id, "agent", "?", { options: ["a", "b"], recommended: 2 })).toThrow(RangeError);
+    expect(() => s.reply(t.id, "agent", "?", { options: ["a", "b"] })).toThrow(/recommend/);
+    expect(() => s.reply(t.id, "user", "?", { options: ["a", "b"], recommended: 0 })).toThrow(RangeError);
+    const plain = s.reply(t.id, "agent", "no options");
+    expect(() => s.pick(t.id, plain.id, 0)).toThrow(RangeError);
+    const offer = s.reply(t.id, "agent", "?", { options: ["a", "b"], applied: 1 });
+    expect(() => s.pick(t.id, offer.id, 2)).toThrow(RangeError);
+    expect(CommentStore.load(dir).threads[0].messages).toHaveLength(3);
+  });
+
+  it("resolves for the agent only once it has read the thread to the end", () => {
+    const dir = tmp();
+    const s = CommentStore.load(dir);
+    const t = s.addThread({ type: "canvas", point: pt }, "first");
+    expect(s.resolveIfRead(t.id).map((m) => m.text)).toEqual(["first"]);
+    expect(CommentStore.load(dir).threads[0].status).toBe("open");
+    s.markRead([t.id]);
+    expect(s.resolveIfRead(t.id)).toEqual([]);
+    expect(CommentStore.load(dir).threads[0].status).toBe("resolved");
   });
 
   it("rejects unknown thread ids", () => {
@@ -102,12 +178,24 @@ describe("CommentStore concurrency", () => {
     expect(final.status).toBe("resolved");
   });
 
-  it("does not deliver a message twice when two stale instances take", () => {
+  it("marks read only what the agent was shown: a message added after the load stays unread", () => {
     const dir = tmp();
-    CommentStore.load(dir).addThread({ type: "canvas", point: pt }, "once");
-    const x = CommentStore.load(dir);
-    const y = CommentStore.load(dir);
-    expect([...x.takeUndelivered(), ...y.takeUndelivered()].map((d) => d.text)).toEqual(["once"]);
+    const t = CommentStore.load(dir).addThread({ type: "canvas", point: pt }, "shown");
+    const shown = CommentStore.load(dir);
+    CommentStore.load(dir).reply(t.id, "user", "arrived while printing");
+    shown.markRead([t.id]);
+    expect(CommentStore.load(dir).unread().map((d) => d.text)).toEqual(["arrived while printing"]);
+  });
+
+  it("never moves the read count back", () => {
+    const dir = tmp();
+    const t = CommentStore.load(dir).addThread({ type: "canvas", point: pt }, "a");
+    const old = CommentStore.load(dir);
+    const s = CommentStore.load(dir);
+    s.reply(t.id, "user", "b");
+    s.markRead([t.id]);
+    old.markRead([t.id]);
+    expect(CommentStore.load(dir).threads[0].seen).toBe(2);
   });
 });
 

@@ -6,6 +6,8 @@ import type { Layout, Overrides } from "../../src/core/layout.ts";
 export interface ViewThread extends Thread {
   where: string;
   orphan: boolean;
+  /** How many messages, from the first, the agent has read. */
+  seen: number;
 }
 export interface FeatureState {
   project: string;
@@ -38,7 +40,7 @@ export const api = {
   post: <T = FeatureState>(path: string, body: unknown = {}) => call<T>(path, { method: "POST", body: JSON.stringify(body) }),
   del: <T = FeatureState>(path: string) => call<T>(path, { method: "DELETE" }),
   comment: (p: string, f: string, anchor: Anchor, text: string) => api.post(`${api.feature(p, f)}/comments`, { anchor, text }),
-  thread: (p: string, f: string, id: string, op: "reply" | "resolve" | "reopen", body: unknown = {}) =>
+  thread: (p: string, f: string, id: string, op: "reply" | "pick" | "resolve" | "reopen", body: unknown = {}) =>
     api.post(`${api.feature(p, f)}/threads/${id}/${op}`, body),
   saveLayout: (p: string, f: string, o: Overrides) => api.post(`${api.feature(p, f)}/layout`, o),
   clearLayout: (p: string, f: string) => api.del(`${api.feature(p, f)}/layout`),

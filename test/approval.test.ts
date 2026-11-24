@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { approvalStatus, approve, takeApprovalEvent } from "../src/core/approval.ts";
+import { approvalStatus, approve, markApprovalSeen, unseenApproval } from "../src/core/approval.ts";
 import { CommentStore } from "../src/core/comments.ts";
 
 function feature() {
@@ -42,11 +42,35 @@ describe("approval", () => {
     expect(approvalStatus(dir).openThreads).toBe(1);
   });
 
-  it("emits the approval event to the agent once", () => {
+  it("stays unseen until the agent is shown it, and only while it covers the spec", () => {
     const dir = feature();
-    expect(takeApprovalEvent(dir)).toBeUndefined();
+    expect(unseenApproval(dir)).toBeUndefined();
+    const a = approve(dir);
+    expect(unseenApproval(dir)).toMatchObject({ sha256: a.sha256 });
+    expect(unseenApproval(dir)).toMatchObject({ sha256: a.sha256 });
+    markApprovalSeen(dir, a);
+    expect(unseenApproval(dir)).toBeUndefined();
+    expect(approvalStatus(dir).status).toBe("approved");
+    // A new approval is news again, unless the spec changed under it.
     approve(dir);
-    expect(takeApprovalEvent(dir)).toMatchObject({ sha256: expect.any(String) });
-    expect(takeApprovalEvent(dir)).toBeUndefined();
+    expect(unseenApproval(dir)).toBeDefined();
+    writeFileSync(join(dir, "flow.yaml"), "version: 1\ntitle: T2\nscreens: [{ id: A, title: A }]\n");
+    expect(unseenApproval(dir)).toBeUndefined();
+  });
+
+  it("does not mark a newer approval seen", async () => {
+    const dir = feature();
+    const first = approve(dir);
+    await new Promise((r) => setTimeout(r, 5));
+    approve(dir);
+    markApprovalSeen(dir, first);
+    expect(unseenApproval(dir)).toBeDefined();
+  });
+
+  it("counts an older file's delivered flag as seen", () => {
+    const dir = feature();
+    const a = approve(dir);
+    writeFileSync(join(dir, "approval.json"), JSON.stringify({ ...a, delivered: true }));
+    expect(unseenApproval(dir)).toBeUndefined();
   });
 });

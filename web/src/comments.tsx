@@ -1,6 +1,7 @@
 import { IconButton, Kbd, Panel } from "@astrafoundry/design/ui";
-import { ArrowUp, CircleCheck, MessageSquare, RotateCcw, X } from "lucide-react";
+import { ArrowUp, Check, CheckCheck, CircleCheck, Clock, MessageSquare, RotateCcw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { optionLetter, type Message } from "../../src/core/comments.ts";
 import { api, type FeatureState, type ViewThread } from "./api.ts";
 import { sendsOnKey } from "./compose.ts";
 import { t } from "./i18n.ts";
@@ -71,6 +72,68 @@ function Composer({
   );
 }
 
+/**
+ * The options an agent message offers, as a recessed set of choices: one click sends the pick to the agent as
+ * your reply. The pick is raised and checked; a closed thread shows them without taking a pick.
+ */
+function Options({
+  message,
+  picked,
+  disabled,
+  onPick,
+}: {
+  message: Message;
+  picked?: number;
+  disabled: boolean;
+  onPick: (option: number) => Promise<unknown>;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div role="group" aria-label={t.options} className="material-well mt-2 flex flex-col gap-0.5 rounded-[14px] p-0.5">
+      {message.options!.map((label, i) => {
+        const chosen = picked === i;
+        return (
+          <button
+            key={i}
+            type="button"
+            data-option={i}
+            aria-pressed={chosen}
+            disabled={disabled || busy || chosen}
+            onClick={() => {
+              setBusy(true);
+              void onPick(i).finally(() => setBusy(false));
+            }}
+            className={
+              "flex items-start gap-2 rounded-[12px] border border-transparent px-2.5 py-2 text-left text-[14px] leading-snug transition-[background-color,scale] duration-150 ease-out enabled:hover:bg-foreground/5 enabled:active:scale-[0.99] disabled:cursor-default " +
+              (chosen ? "material-thumb" : "")
+            }
+          >
+            <span className="w-3 shrink-0 pt-px font-mono text-[12px] text-muted-foreground tabular-nums">{optionLetter(i)}</span>
+            <span className="min-w-0 flex-1 text-pretty">{label}</span>
+            {(i === message.applied || i === message.recommended) && !chosen && (
+              <span className="flex shrink-0 items-center gap-1 pt-px text-[12px] text-muted-foreground">
+                {i === message.applied && <span aria-hidden className="size-1.5 rounded-full" style={{ background: "var(--success)" }} />}
+                {i === message.applied ? t.applied : t.recommended}
+              </span>
+            )}
+            {chosen && <Check size={16} className="mt-px shrink-0" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Under your last message: whether the agent has read the thread that far. */
+function ReadMark({ read }: { read: boolean }) {
+  return (
+    <p data-read={read} className="mt-1 flex items-center gap-1 text-[12px] text-muted-foreground">
+      {read ? <CheckCheck size={14} aria-hidden /> : <Clock size={13} aria-hidden />}
+      {read ? t.agentRead : t.agentUnread}
+    </p>
+  );
+}
+
 function ThreadView({
   thread,
   state,
@@ -84,8 +147,15 @@ function ThreadView({
   onFocus: () => void;
   onChange: (s: FeatureState) => void;
 }) {
-  const op = (o: "reply" | "resolve" | "reopen", body?: unknown) => api.thread(state.project, state.feature, thread.id, o, body).then(onChange);
+  const op = (o: "reply" | "pick" | "resolve" | "reopen", body?: unknown) => api.thread(state.project, state.feature, thread.id, o, body).then(onChange);
   const open = thread.status === "open";
+  // Each offer's latest pick, and the user's last message (where the read mark goes).
+  const picks = new Map<string, number>();
+  let lastUser = -1;
+  thread.messages.forEach((m, i) => {
+    if (m.pick) picks.set(m.pick.message, m.pick.option);
+    if (m.author === "user") lastUser = i;
+  });
   return (
     <li
       data-active={active}
@@ -109,10 +179,18 @@ function ThreadView({
         )}
       </div>
       <ul className="space-y-2.5">
-        {thread.messages.map((m) => (
+        {thread.messages.map((m, i) => (
           <li key={m.id} data-message className="text-[14px] leading-snug">
             <div className="mb-0.5 text-[12px] font-medium text-muted-foreground">{m.author === "agent" ? t.agent : t.you}</div>
-            <p className="text-pretty whitespace-pre-wrap">{m.text}</p>
+            <p className="text-pretty whitespace-pre-wrap">
+              {/* The option itself is checked in the offer above. */}
+              {m.pick ? t.picked(optionLetter(m.pick.option)) : m.text}
+            </p>
+            {m.options && (
+              <Options message={m} picked={picks.get(m.id)} disabled={!open} onPick={(option) => op("pick", { message: m.id, option })} />
+            )}
+            {/* Only while the thread waits on the agent: once it has answered, it has read. */}
+            {open && i === lastUser && i === thread.messages.length - 1 && <ReadMark read={i < thread.seen} />}
           </li>
         ))}
       </ul>

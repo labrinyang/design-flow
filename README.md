@@ -104,7 +104,9 @@ The agent receives it where it is anchored:
 [design-flow] sign-up · new comment #4a95ec3d on Screen S02 Enter code · p "Resend code in 0:24" ([data-id="resend"]): What happens after 5 wrong codes? I only see the expiry path.
 ```
 
-It changes `flow.yaml`, replies with `design-flow reply`, and resolves the thread when it is settled. Its reply appears under your comment; the canvas redraws as soon as the file changes.
+It changes `flow.yaml`, replies with `design-flow reply`, and resolves the thread when it is settled. Its reply appears under your comment; the canvas redraws as soon as the file changes. Until it answers, your last message says whether the agent has read it. A comment counts as read once a command the agent ran has shown it the text; a background watcher receiving it does not count, so a comment is never lost to a watcher nobody reads.
+
+When the choice is yours to make, the agent replies with two to four options and marks the one it recommends; a click sends your pick back as your answer. When it can tell what you would likely want, it applies that and offers the other way as an option marked **Applied**, so changing course is one click too.
 
 ### 4. Approve
 
@@ -148,10 +150,10 @@ node .claude/skills/design-flow/scripts/design-flow.mjs <command>
 | --- | --- |
 | `open <feature> [--no-open]` | Start the server, write a commented template if `flow.yaml` is missing, open the canvas |
 | `check <feature>` | Validate; prints `file:line:col`, the problem and a fix; exit 0 clean, 3 with issues |
-| `comments <feature> [--unread] [--json]` | Threads, where each is anchored, and who said what |
-| `reply <feature> <thread> --text "…"` | Reply as the agent |
-| `resolve <feature> <thread>` | Resolve a thread |
-| `status <feature>` | `draft`, `approved` or `stale`, and open threads |
+| `comments <feature> [--unread] [--json]` | Threads, where each is anchored, and who said what; what it shows counts as read |
+| `reply <feature> <thread> --text "…" [--option "…"]… [--recommend A] [--applied A]` | Reply as the agent, with two to four options you pick on the canvas if it gives them |
+| `resolve <feature> <thread>` | Resolve a thread the agent has read to the end |
+| `status <feature>` | `draft`, `approved` or `stale`, open and unread threads |
 | `watch` | One line per new comment or approval |
 | `list` / `stop` | Features in this project / stop the server |
 

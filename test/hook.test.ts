@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
 import { CommentStore } from "../src/core/comments.ts";
 import { startServer, type Server } from "../src/server/server.ts";
 
@@ -40,7 +41,7 @@ describe("design-flow hook", () => {
     expect(await hook(dir, home)).toBe("");
   });
 
-  it("injects undelivered comments as additional context, once", async () => {
+  it("injects unread comments as additional context, then counts them as read", async () => {
     const home = mkdtempSync(join(tmpdir(), "df-hook-home-"));
     server = await startServer({ port: 0, home });
     const dir = project();
@@ -50,6 +51,24 @@ describe("design-flow hook", () => {
     expect(out.hookSpecificOutput.additionalContext).toContain("Screen A Amount");
     expect(out.hookSpecificOutput.additionalContext).toContain("Add a back button");
     expect(out.hookSpecificOutput.additionalContext).toContain("design-flow comments pay");
+    expect(await hook(dir, home)).toBe("");
+  });
+
+  it("still injects a comment that was sent to a watcher, since sending is not reading", async () => {
+    const home = mkdtempSync(join(tmpdir(), "df-hook-home-"));
+    server = await startServer({ port: 0, home });
+    const base = `http://127.0.0.1:${server.port}`;
+    const dir = project();
+    const post = (path: string, body: unknown) =>
+      fetch(base + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
+    const { key } = await post("/api/projects", { dir });
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/events?project=${key}`);
+    await new Promise((r) => ws.on("open", r));
+    const pushed = new Promise((r) => ws.on("message", (d) => String(d).includes("Round the total") && r(true)));
+    await post(`/api/projects/${key}/features/pay/comments`, { anchor: { type: "screen", screen: "A", point: { x: 0, y: 0 } }, text: "Round the total" });
+    expect(await pushed).toBe(true);
+    ws.close();
+    expect(JSON.parse(await hook(dir, home)).hookSpecificOutput.additionalContext).toContain("Round the total");
     expect(await hook(dir, home)).toBe("");
   });
 

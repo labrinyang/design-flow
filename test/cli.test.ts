@@ -141,11 +141,72 @@ describe("design-flow CLI", () => {
     expect(list.out).toContain("What if it fails?");
     const id = list.out.match(/#(\w{8})/)![1];
     expect((await df(["comments", "pay", "--unread"], dir)).out).not.toContain("What if it fails?");
-    expect((await df(["reply", "pay", id, "--text", "Added an error screen"], dir)).code).toBe(0);
+    const file = join(dir, ".design-flow", "pay", "comments.json");
+    // Options need two to four labels and a recommendation (or the one applied); a bad reply stores nothing.
+    for (const bad of [
+      ["--option", "only one", "--recommend", "A"],
+      ["--option", "a", "--option", "b"],
+      ["--option", "a", "--option", "b", "--recommend", "C"],
+      ["--recommend", "A"],
+    ])
+      expect((await df(["reply", "pay", id, "--text", "x", ...bad], dir)).code, bad.join(" ")).toBe(2);
+    const replied = await df(
+      ["reply", "pay", id, "--text", "Two ways to show it", "--option", "An error screen", "--option=An inline error", "--applied", "1"],
+      dir,
+    );
+    expect(replied).toMatchObject({ code: 0, out: `Replied to #${id}.\n` });
+    const offer = JSON.parse(readFileSync(file, "utf8")).threads[0].messages[1];
+    expect(offer).toMatchObject({ author: "agent", text: "Two ways to show it", options: ["An error screen", "An inline error"], applied: 0 });
+    expect((await df(["comments", "pay"], dir)).out).toContain("    A. An error screen (applied)\n    B. An inline error\n");
+    // The user picks B on the canvas. Resolving waits until the agent has read that.
+    await fetch(`${base}/api/projects/${key}/features/pay/threads/${id}/pick`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: offer.id, option: 1 }),
+    });
+    const blocked = await df(["resolve", "pay", id], dir);
+    expect(blocked.code).toBe(1);
+    expect(blocked.out).toContain("picked B: An inline error");
     expect((await df(["resolve", "pay", id], dir)).code).toBe(0);
-    const threads = JSON.parse(readFileSync(join(dir, ".design-flow", "pay", "comments.json"), "utf8")).threads;
+    const threads = JSON.parse(readFileSync(file, "utf8")).threads;
     expect(threads[0].status).toBe("resolved");
-    expect(threads[0].messages[1]).toMatchObject({ author: "agent", text: "Added an error screen" });
+    expect(threads[0].messages.map((m: { author: string }) => m.author)).toEqual(["user", "agent", "user"]);
+  });
+
+  it("a comment the watcher printed stays unread until comments shows it to the agent", async () => {
+    const dir = project(FLOW);
+    const base = new URL((await df(["open", "pay", "--no-open"], dir)).out.match(/http:\/\/\S+/)![0]).origin;
+    const child = spawn(process.execPath, [BIN, "watch"], { cwd: dir, env });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    try {
+      const p = await until("watch to register", () => registeredOn(dir));
+      await fetch(`${base}/api/projects/${p.key}/features/pay/comments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ anchor: { type: "screen", screen: "B", point: { x: 0, y: 0 } }, text: "Show the fee" }),
+      });
+      await until("the watch line", () => out.includes("Show the fee") || undefined);
+      expect((await df(["status", "pay"], dir)).out).toContain("1 open thread (1 unread)");
+      expect((await df(["comments", "pay", "--unread"], dir)).out).toContain("Show the fee");
+      expect((await df(["comments", "pay", "--unread"], dir)).out).toBe("No unread comments.\n");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("reply shows the agent what the user wrote that it had not read", async () => {
+    const dir = project(FLOW);
+    const base = new URL((await df(["open", "pay", "--no-open"], dir)).out.match(/http:\/\/\S+/)![0]).origin;
+    const p = (await registeredOn(dir))!;
+    const api = (path: string, body: unknown) =>
+      fetch(`${base}/api/projects/${p.key}/features/pay${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    await api("/comments", { anchor: { type: "screen", screen: "A", point: { x: 0, y: 0 } }, text: "First note" });
+    const id = (await df(["comments", "pay", "--unread"], dir)).out.match(/#(\w{8})/)![1];
+    await api(`/threads/${id}/reply`, { text: "One more thing" });
+    const r = await df(["reply", "pay", id, "--text", "Done"], dir);
+    expect(r.out).toContain("Before your reply the user also wrote, unread until now:\n  user: One more thing");
+    expect((await df(["comments", "pay", "--unread"], dir)).out).toBe("No unread comments.\n");
   });
 
   it("status reports draft, approved and stale", async () => {
