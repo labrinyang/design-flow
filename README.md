@@ -55,7 +55,7 @@ claude plugin marketplace add stvlynn/design-flow
 claude plugin install design-flow@design-flow
 ```
 
-The plugin adds a prompt hook (unread comments and approvals are attached to your next message), a stop hook (an agent about to stop while you have comments it has not read goes on to read them) and a monitor that streams them into the session. It loads in the next session, or after `/reload-plugins`. Plugin monitors need a recent Claude Code; on older versions the prompt hook still delivers comments.
+The plugin adds a prompt hook (unread comments and approvals are attached to your next message), a stop hook (an agent about to stop while you have comments it has not read goes on to read them) and a monitor that streams them into the session. It loads in the next session, or after `/reload-plugins`. Plugin monitors need a recent Claude Code; on older versions the prompt hook still delivers comments. The hooks and the monitor look in the folder the session was opened in and in every folder the agent has run a `design-flow` command on in that session, so a canvas kept in another checkout (reached with `--project-dir`) still reaches the session working on it, and no other session.
 
 ## Use it
 
@@ -158,10 +158,10 @@ node .claude/skills/design-flow/scripts/design-flow.mjs <command>
 | --- | --- |
 | `open <feature> [--no-open]` | Start the server, write a commented template if `flow.yaml` is missing, open the canvas |
 | `check <feature> [--visual]` | Validate; prints `file:line:col`, the problem and a fix; exit 0 clean, 3 with issues. `--visual` also renders every screen and reports content wider than the screen, text cut off and text over text |
-| `shot <feature> <screen> [--element <selector>] [--scale 1\|2] [--out <file>]` | A PNG of a screen, or of one element, at 2× by default, in the temp directory unless `--out`; prints its path |
-| `shot <feature> --all [--dir <dir>]` | A PNG of every screen |
+| `shot <feature> <screen>… [--lane <lane>]… [--sheet] [--element <selector>] [--scale 1\|2] [--out <file>] [--dir <dir>]` | PNGs of screens, or of one element, at 2× by default, in the temp directory unless `--out` or `--dir`; prints their paths. Several screens render in one browser; `--lane` adds a lane's screens; `--sheet` puts them on labelled overview images and prints those |
+| `shot <feature> --all [--sheet] [--dir <dir>]` | A PNG of every screen, or sheets of them all |
 | `outline <feature> [<screen>] [--json]` | The flow as text: screens, edges, open and unread threads. With a screen: its rendered elements, with boxes, selectors and `prototype.html` lines |
-| `comments <feature> [--unread] [--json]` | Threads, where each is anchored, and who said what; what it shows counts as read |
+| `comments <feature> [--unread] [--json] [--shots]` | Threads, where each is anchored, and who said what; what it shows counts as read. `--shots` adds a shot of each commented screen with the element ringed, and a sheet of them all |
 | `reply <feature> <thread> --text "…" [--option "…"]… [--recommend A] [--applied A]` | Reply as the agent, with two to four options you pick on the canvas if it gives them |
 | `ask <feature> <screen> --text "…" [--element <selector>] [--option "…"]… [--recommend A] [--applied A]` | Start a thread as the agent, on a screen or one of its elements |
 | `resolve <feature> <thread>` | Resolve a thread the agent has read to the end |
@@ -173,7 +173,7 @@ Every command takes `--project-dir <path>`; the default is the current directory
 
 ### Letting the agent see the screens
 
-An agent writes each screen's HTML without seeing it. `check --visual`, `shot` and `outline <feature> <screen>` render screens the way the canvas does, at their viewport, in headless Chrome, Chromium, Edge or Brave, whichever is installed; set `DESIGN_FLOW_CHROME` to a browser's executable to choose one. Each run starts a fresh browser with a throwaway profile and closes it when done. Shots go to the system's temp directory, never into your project.
+An agent writes each screen's HTML without seeing it. `check --visual`, `shot` and `outline <feature> <screen>` render screens the way the canvas does, at their viewport, in headless Chrome, Chromium, Edge or Brave, whichever is installed; set `DESIGN_FLOW_CHROME` to a browser's executable to choose one. Each run starts a fresh browser with a throwaway profile and closes it when done; `shot` with several screens renders them all in that one browser, and `--sheet` lays them out on labelled overview images. `comments --shots` shows the agent each commented screen with your element ringed. Shots go to the system's temp directory, never into your project.
 
 ## flow.yaml
 

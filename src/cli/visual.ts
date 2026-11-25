@@ -81,24 +81,50 @@ const slug = (s: string) =>
     .slice(0, 40) || "element";
 
 export interface ShotOptions {
-  screen?: string;
+  /** Screens named on the command line, in that order. */
+  screens: string[];
+  /** Lanes whose screens to add, in flow order. */
+  lanes: string[];
   all: boolean;
   element?: string;
-  scale: number;
+  /** Device px per CSS px: 2 unless a sheet is asked for, which needs no more than 1. */
+  scale?: number;
   out?: string;
   dir?: string;
+  /** Put the screens on labelled overview images and print those instead. */
+  sheet: boolean;
 }
 
-/** PNGs of screens, in one browser; returns their paths. */
+const SHOT_USAGE =
+  "usage: design-flow shot <feature> <screen>... [--lane <lane>]... [--sheet] [--element <selector>] [--scale 1|2] [--out <file>] [--dir <dir>], or shot <feature> --all [--sheet]";
+
+/** The screens a shot names: the ones listed, then each lane's screens in flow order, each once; or every screen. */
+export function screensFor(flow: Flow, o: Pick<ShotOptions, "screens" | "lanes" | "all">): Screen[] {
+  if (o.all) {
+    if (o.screens.length || o.lanes.length) throw new UsageError("shot --all takes no screens and no --lane");
+    return flow.screens;
+  }
+  const picked = o.screens.map((id) => screenOf(flow, id, SHOT_USAGE));
+  for (const lane of o.lanes) {
+    if (!flow.lanes.some((l) => l.id === lane)) throw new UsageError(`no lane ${lane} in flow.yaml; its lanes are ${flow.lanes.map((l) => l.id).join(", ") || "none"}`);
+    picked.push(...flow.screens.filter((s) => s.lane === lane));
+  }
+  const unique = [...new Map(picked.map((s) => [s.id, s])).values()];
+  if (!unique.length) throw new UsageError(o.lanes.length ? `no screens in lane ${o.lanes.join(", ")}` : SHOT_USAGE);
+  return unique;
+}
+
+/** PNGs of screens, in one browser; returns their paths, or with `sheet` the paths of the sheets they are on. */
 export async function shot(f: Feature, o: ShotOptions, warn: (m: string) => void): Promise<string[]> {
-  const usage = "usage: design-flow shot <feature> <screen> [--element <selector>] [--scale 1|2] [--out <file>], or shot <feature> --all [--dir <dir>]";
-  if (o.all && (o.screen || o.element || o.out)) throw new UsageError("shot --all takes no screen, --element or --out; it writes <screen>.png for each screen into --dir");
-  const screens = o.all ? f.flow.screens : [screenOf(f.flow, o.screen, usage)];
+  const screens = screensFor(f.flow, o);
+  if (o.element && (screens.length > 1 || o.sheet || o.all)) throw new UsageError("--element shoots one element of one screen; name one screen and leave out --sheet");
+  if (o.out && screens.length > 1 && !o.sheet) throw new UsageError("--out names one file; for several screens use --dir, or --sheet to put them on one image");
+  const scale = o.scale ?? (o.sheet ? 1 : 2);
   const dir = o.dir ? resolve(o.dir) : shotsDir(f.name);
   return withBrowser(async (b) => {
-    const paths: string[] = [];
+    const shots: { screen: Screen; file: string; png: Buffer }[] = [];
     for (const s of screens)
-      await onScreen(b, f.flow, s, o.scale, async (page) => {
+      await onScreen(b, f.flow, s, scale, async (page) => {
         let clip: Clip | undefined;
         if (o.element) {
           const found = await locate(page, o.element, f, s, true);
@@ -106,12 +132,195 @@ export async function shot(f: Feature, o: ShotOptions, warn: (m: string) => void
           clip = padded(found, 8);
           if (clip.width < 1 || clip.height < 1) throw new UsageError(`--element ${o.element} on screen ${s.id} is outside the screen`);
         }
-        const file = o.out ? resolve(o.out) : join(dir, `${s.id}${o.element ? `-${slug(o.element)}` : ""}.png`);
+        const file = o.out && !o.sheet ? resolve(o.out) : join(dir, `${s.id}${o.element ? `-${slug(o.element)}` : ""}.png`);
+        const png = await page.screenshot(clip);
         mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file, await page.screenshot(clip));
-        paths.push(file);
+        writeFileSync(file, png);
+        shots.push({ screen: s, file, png });
       });
-    return paths;
+    if (!o.sheet) return shots.map((x) => x.file);
+    const tiles = shots.map((x) => ({ png: x.png, size: viewportOf(f.flow, x.screen), label: x.screen.id, title: x.screen.title }));
+    const sheets = await drawSheets(b, tiles, scale, (page, n, count) => {
+      if (o.out) return count > 1 ? resolve(o.out).replace(/(\.png)?$/i, `-${n}.png`) : resolve(o.out);
+      const first = tiles[page.items[0].index].label;
+      const last = tiles[page.items[page.items.length - 1].index].label;
+      return join(dir, `sheet-${first}${last !== first ? `-${last}` : ""}.png`);
+    });
+    warn(`each screen's own PNG is in ${dir}`);
+    return sheets;
+  });
+}
+
+/**
+ * Sheet sizes in CSS px: about the most an agent reads in one image without it being scaled down hard. A sheet
+ * holds up to ten phone screens or four wider ones.
+ */
+export const SHEET = { width: 1400, maxHeight: 1200, gap: 16, pad: 24, label: 26 } as const;
+type SheetSpec = { width: number; maxHeight: number; gap: number; pad: number; label: number };
+
+/** How big a screen is drawn on a sheet: phones 230 px wide, wider screens 660, never taller than a sheet allows. */
+export function tileSize(vp: { width: number; height: number }, s: SheetSpec = SHEET): { w: number; h: number } {
+  let w = vp.width <= 600 ? 230 : 660;
+  let h = Math.round((w * vp.height) / vp.width);
+  const room = s.maxHeight - 2 * s.pad - s.label;
+  if (h > room) {
+    w = Math.max(1, Math.round((room * vp.width) / vp.height));
+    h = room;
+  }
+  return { w, h };
+}
+
+/** One sheet: its size, and where each tile goes (x, y is the top left of its label; the image sits under it). */
+export interface SheetPage {
+  width: number;
+  height: number;
+  items: { index: number; x: number; y: number; w: number; h: number }[];
+}
+
+/** Lays tiles out in rows, left to right, and starts a new sheet when the next row would not fit. */
+export function planSheets(tiles: { w: number; h: number }[], s: SheetSpec = SHEET): SheetPage[] {
+  const inner = s.width - 2 * s.pad;
+  const rows: { index: number; w: number; h: number }[][] = [];
+  let row: { index: number; w: number; h: number }[] = [];
+  let used = 0;
+  tiles.forEach((t, index) => {
+    if (row.length && used + s.gap + t.w > inner) {
+      rows.push(row);
+      row = [];
+      used = 0;
+    }
+    used += (row.length ? s.gap : 0) + t.w;
+    row.push({ index, ...t });
+  });
+  if (row.length) rows.push(row);
+  const pages: SheetPage[] = [];
+  let cur: { items: SheetPage["items"]; right: number; bottom: number } | undefined;
+  const close = () => cur && pages.push({ width: cur.right + s.pad, height: cur.bottom + s.pad, items: cur.items });
+  for (const r of rows) {
+    const height = s.label + Math.max(...r.map((t) => t.h));
+    let top = cur ? cur.bottom + s.gap : s.pad;
+    if (cur && top + height + s.pad > s.maxHeight) {
+      close();
+      cur = undefined;
+      top = s.pad;
+    }
+    cur ??= { items: [], right: s.pad, bottom: s.pad };
+    let x = s.pad;
+    for (const t of r) {
+      cur.items.push({ index: t.index, x, y: top, w: t.w, h: t.h });
+      x += t.w + s.gap;
+    }
+    cur.right = Math.max(cur.right, x - s.gap);
+    cur.bottom = top + height;
+  }
+  close();
+  return pages;
+}
+
+interface SheetTile {
+  png: Buffer;
+  size: { width: number; height: number };
+  label: string;
+  title: string;
+}
+
+const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+
+function sheetHtml(page: SheetPage, tiles: SheetTile[]): string {
+  const items = page.items.map((it) => {
+    const t = tiles[it.index];
+    return `<div class="t" style="left:${it.x}px;top:${it.y}px;width:${it.w}px"><div class="l"><b>${esc(t.label)}</b> ${esc(t.title)}</div><img src="data:image/png;base64,${t.png.toString("base64")}" width="${it.w}" height="${it.h}" alt=""></div>`;
+  });
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:#f4f3f0}
+.t{position:absolute}
+.l{height:${SHEET.label}px;font:14px/20px system-ui,sans-serif;color:#6b6862;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.l b{color:#14120e;font-weight:600;margin-right:3px}
+img{display:block;border-radius:6px;box-shadow:0 0 0 1px rgba(20,18,14,.16)}
+</style></head><body>${items.join("")}</body></html>`;
+}
+
+/** Draws the tiles on as many sheets as they need and writes each; returns the files. */
+async function drawSheets(b: Browser, tiles: SheetTile[], scale: number, fileFor: (page: SheetPage, n: number, count: number) => string): Promise<string[]> {
+  const pages = planSheets(tiles.map((t) => tileSize(t.size)));
+  const files: string[] = [];
+  for (const [i, page] of pages.entries()) {
+    const p = await b.open(sheetHtml(page, tiles), { width: page.width, height: page.height }, scale);
+    try {
+      const file = fileFor(page, i + 1, pages.length);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, await p.screenshot());
+      files.push(file);
+    } finally {
+      await p.close();
+    }
+  }
+  return files;
+}
+
+/**
+ * In the page: scrolls the element `selector` names into view and rings it the way the canvas does, an ink outline
+ * around a white gap that shows on light and dark screens; false when nothing visible matches.
+ */
+export function ringElement(selector: string): boolean | Promise<boolean> {
+  let el: Element | null = null;
+  try {
+    el = document.body.querySelector(selector);
+  } catch {
+    return false;
+  }
+  if (!el) return false;
+  el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  const r = el.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return false;
+  // Kept inside the viewport with room for the ring, so a ring around the whole screen still shows.
+  const m = 5;
+  const left = Math.max(r.left, m);
+  const top = Math.max(r.top, m);
+  const width = Math.min(r.right, innerWidth - m) - left;
+  const height = Math.min(r.bottom, innerHeight - m) - top;
+  if (width < 1 || height < 1) return false;
+  const ring = document.createElement("div");
+  ring.style.cssText = `position:fixed;left:${left}px;top:${top}px;width:${width}px;height:${height}px;outline:3px solid rgb(20,18,14);outline-offset:2px;box-shadow:0 0 0 2px #fff;border-radius:4px;pointer-events:none;z-index:2147483647`;
+  document.documentElement.appendChild(ring);
+  return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(true))));
+}
+
+export interface CommentShot {
+  thread: string;
+  file?: string;
+  /** Why the shot has no ring, or why there is none. */
+  note?: string;
+}
+
+/** For open threads on a screen or one of its elements: a shot of that screen, the element ringed, and one sheet of them all. */
+export async function commentShots(f: Feature, threads: Thread[]): Promise<{ shots: CommentShot[]; sheets: string[] }> {
+  const wanted = threads.filter((t) => t.status === "open" && (t.anchor.type === "element" || t.anchor.type === "screen"));
+  if (!wanted.length) return { shots: [], sheets: [] };
+  const dir = shotsDir(f.name);
+  return withBrowser(async (b) => {
+    const shots: CommentShot[] = [];
+    const tiles: SheetTile[] = [];
+    for (const t of wanted) {
+      const a = t.anchor as Extract<Anchor, { type: "element" | "screen" }>;
+      const s = f.flow.screens.find((x) => x.id === a.screen);
+      if (!s) {
+        shots.push({ thread: t.id, note: `screen ${a.screen} is no longer in flow.yaml` });
+        continue;
+      }
+      let note: string | undefined;
+      const png = await onScreen(b, f.flow, s, 1, async (page) => {
+        if (a.type === "element" && !(await page.call(ringElement, a.selector))) note = "its element is gone; this is the screen as it is now";
+        return page.screenshot();
+      });
+      const file = join(dir, `comment-${t.id}.png`);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, png);
+      shots.push({ thread: t.id, file, ...(note ? { note } : {}) });
+      tiles.push({ png, size: viewportOf(f.flow, s), label: `#${t.id}`, title: `${s.id} ${s.title}` });
+    }
+    const sheets = tiles.length > 1 ? await drawSheets(b, tiles, 1, (_page, n, count) => join(dir, `comment-sheet${count > 1 ? `-${n}` : ""}.png`)) : [];
+    return { shots, sheets };
   });
 }
 

@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -24,18 +24,11 @@ function project() {
   return dir;
 }
 
-async function hook(dir: string, home: string) {
-  const r = await run(process.execPath, [BIN, "hook"], {
-    cwd: dir,
-    env: { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_LOCALE: "en" },
-  });
-  return r.stdout;
-}
-
-/** Runs `hook --stop` with `input` on stdin: as JSON, or a string as it is. */
-function stopHook(dir: string, home: string, input: unknown): Promise<string> {
+/** Runs the CLI as Claude Code runs a hook, with `input` on stdin: as JSON, or a string as it is. */
+function hookRun(args: string[], dir: string, home: string, input: unknown): Promise<string> {
   return new Promise((done, fail) => {
-    const child = spawn(process.execPath, [BIN, "hook", "--stop"], { cwd: dir, env: { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_LOCALE: "en" } });
+    const env = { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_LOCALE: "en", CLAUDE_CODE_SESSION_ID: "" };
+    const child = spawn(process.execPath, [BIN, ...args], { cwd: dir, env });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.on("error", fail);
@@ -43,6 +36,10 @@ function stopHook(dir: string, home: string, input: unknown): Promise<string> {
     child.stdin.end(typeof input === "string" ? input : JSON.stringify(input));
   });
 }
+
+const hook = (dir: string, home: string, session = "s") =>
+  hookRun(["hook"], dir, home, { session_id: session, hook_event_name: "UserPromptSubmit", prompt: "go on" });
+const stopHook = (dir: string, home: string, input: unknown) => hookRun(["hook", "--stop"], dir, home, input);
 
 describe("design-flow hook --stop", () => {
   const stopping = { session_id: "s", hook_event_name: "Stop", stop_hook_active: false, last_assistant_message: "Done." };
@@ -62,7 +59,7 @@ describe("design-flow hook --stop", () => {
     const said = out.hookSpecificOutput.additionalContext;
     expect(said).toContain("3 unread messages");
     expect(said).toContain("1 on intro, 2 on pay");
-    expect(said).toContain("design-flow comments intro, then design-flow comments pay");
+    expect(said).toContain("design-flow comments intro --shots, then design-flow comments pay --shots");
     // It names no message, so nothing counts as read: the next prompt still delivers all three.
     expect(said).not.toContain("Secret wording");
     expect(JSON.parse(await stopHook(dir, home, stopping))).toEqual(out);
@@ -136,5 +133,29 @@ describe("design-flow hook", () => {
     const home = mkdtempSync(join(tmpdir(), "df-hook-home-"));
     server = await startServer({ port: 0, home });
     expect(await hook(mkdtempSync(join(tmpdir(), "df-empty-")), home)).toBe("");
+  });
+});
+
+describe("a canvas in another folder", () => {
+  it("reaches the session whose commands used that folder, through both hooks, and no other session", async () => {
+    const home = mkdtempSync(join(tmpdir(), "df-hook-home-"));
+    const own = mkdtempSync(join(tmpdir(), "df-hook-own-"));
+    const other = project();
+    CommentStore.load(join(other, ".design-flow", "pay")).addThread({ type: "screen", screen: "A", point: { x: 0, y: 0 } }, "Make the button wider");
+    const stopping = { session_id: "s1", hook_event_name: "Stop", stop_hook_active: false };
+    const status = (session: string) =>
+      run(process.execPath, [BIN, "status", "pay", "--project-dir", other], { cwd: own, env: { ...process.env, DESIGN_FLOW_HOME: home, CLAUDE_CODE_SESSION_ID: session } });
+    // A command run outside Claude Code ties the folder to no session.
+    await status("");
+    expect(await stopHook(own, home, stopping)).toBe("");
+    await status("s1");
+    const where = realpathSync(other);
+    const told = JSON.parse(await stopHook(own, home, stopping)).hookSpecificOutput.additionalContext;
+    expect(told).toContain(`design-flow comments pay --shots --project-dir ${where}`);
+    expect(await stopHook(own, home, { ...stopping, session_id: "s2" })).toBe("");
+    expect(await hook(own, home, "s2")).toBe("");
+    const said = JSON.parse(await hook(own, home, "s1")).hookSpecificOutput.additionalContext;
+    expect(said).toContain("Make the button wider");
+    expect(said).toContain(`→ apply them to ${join(where, ".design-flow", "pay", "flow.yaml")}, then run: design-flow comments pay --shots --project-dir ${where}`);
   });
 });

@@ -11,6 +11,7 @@ import { checkPrototype, readPrototype } from "../core/prototype.ts";
 import { BUILD, DEFAULT_PORT, projectKey, VERSION } from "../server/server.ts";
 import { PROTOTYPE, TEMPLATE } from "./template.ts";
 import { UsageError } from "./usage.ts";
+import { canonical, claimWatch, linkedProjects, linkSession, sessionId, shellWord } from "./sessions.ts";
 
 declare const __DESIGN_FLOW_BUNDLE__: boolean | undefined;
 const FEATURE_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -25,8 +26,8 @@ interface Args {
   lists: Record<string, string[]>;
 }
 /** Flags that take a value, as `--flag value` or `--flag=value`. */
-const VALUE_FLAGS = ["text", "project-dir", "option", "recommend", "applied", "element", "scale", "out", "dir"];
-const LIST_FLAGS = ["option"];
+const VALUE_FLAGS = ["text", "project-dir", "option", "recommend", "applied", "element", "scale", "out", "dir", "lane"];
+const LIST_FLAGS = ["option", "lane"];
 function parseArgs(argv: string[]): Args {
   const out: Args = { _: [], flags: {}, lists: {} };
   for (let i = 0; i < argv.length; i++) {
@@ -79,9 +80,11 @@ function valueFlag(a: Args, k: string): string | undefined {
   return v;
 }
 
-/** A thread as the agent reads it: messages marked (new) when unread, and each offer's options. */
-function printThread(t: Thread, where: string, fresh: Set<string>) {
+/** A thread as the agent reads it: messages marked (new) when unread, each offer's options, and its shot when asked for. */
+function printThread(t: Thread, where: string, fresh: Set<string>, shot?: { file?: string; note?: string }) {
   console.log(`#${t.id} [${t.status}] ${where}`);
+  if (shot?.file) console.log(`  shot: ${shot.file}${shot.note ? ` (${shot.note})` : ""}`);
+  else if (shot?.note) console.log(`  shot: none, ${shot.note}`);
   for (const m of t.messages) {
     console.log(`  ${m.author === "agent" ? "agent" : "user "}${fresh.has(m.id) ? " (new)" : ""}: ${messageText(t, m)}`);
     m.options?.forEach((o, i) => {
@@ -245,13 +248,15 @@ Usage: design-flow <command> [feature] [options]
   open <feature> [--no-open]       Start the server, create flow.yaml if missing, open the canvas
   check <feature> [--visual]       Validate flow.yaml (exit 0 clean, 3 issues); --visual also renders
                                    every screen and reports overflow, cut-off and overlapping text
-  shot <feature> <screen> [--element <selector>] [--scale 1|2] [--out <file>]
-  shot <feature> --all [--dir <dir>]
-                                   Render screens to PNG (in the temp dir by default) and print each path
+  shot <feature> <screen>... [--lane <lane>]... [--sheet] [--element <selector>] [--scale 1|2] [--out <file>] [--dir <dir>]
+  shot <feature> --all [--sheet] [--dir <dir>]
+                                   Render screens to PNG (in the temp dir by default) and print each path;
+                                   --sheet puts them on labelled overview images and prints those
   outline <feature> [<screen>] [--json]
                                    Screens, edges and threads; with a screen, its rendered element tree
-  comments <feature> [--unread] [--json]
-                                   Show comment threads; what it shows counts as read
+  comments <feature> [--unread] [--json] [--shots]
+                                   Show comment threads; what it shows counts as read. --shots adds a shot
+                                   of each commented screen, its element ringed, and a sheet of them all
   reply <feature> <thread> --text <text> [--option <text>]... [--recommend <A>] [--applied <A>]
                                    Reply as the agent; with 2 to 4 options the user picks one with a click
   ask <feature> <screen> --text <text> [--element <selector>] [--option <text>]... [--recommend <A>] [--applied <A>]
@@ -267,11 +272,20 @@ Options: --project-dir <path> (default: current directory)
 Rendering uses Chrome, Chromium, Edge or Brave; set DESIGN_FLOW_CHROME to choose one.
 `;
 
+/** Commands that tie their folder to the Claude Code session running them, so its hooks and monitor look there. */
+const LINKING = new Set(["open", "check", "shot", "outline", "comments", "reply", "ask", "resolve", "status", "list"]);
+
 export async function main(argv: string[]): Promise<number> {
   try {
     const a = parseArgs(argv);
     const cmd = a._[0];
     const dir = projectDir(a);
+    if (cmd && LINKING.has(cmd) && (cmd === "open" || existsSync(join(dir, ".design-flow"))))
+      try {
+        linkSession(home(), sessionId(process.env.CLAUDE_CODE_SESSION_ID), dir);
+      } catch {
+        /* the link only helps the hooks find this folder; the command goes on without it */
+      }
     switch (cmd) {
       case "open": {
         const f = feature(a);
@@ -299,9 +313,18 @@ export async function main(argv: string[]): Promise<number> {
       case "shot": {
         const f = feature(a);
         const { loadFeature, shot } = await import("./visual.ts");
-        const scale = valueFlag(a, "scale") ?? "2";
-        if (scale !== "1" && scale !== "2") throw new UsageError("--scale is 1 or 2");
-        const opts = { screen: a._[2], all: !!a.flags.all, element: valueFlag(a, "element"), scale: Number(scale), out: valueFlag(a, "out"), dir: valueFlag(a, "dir") };
+        const scale = valueFlag(a, "scale");
+        if (scale !== undefined && scale !== "1" && scale !== "2") throw new UsageError("--scale is 1 or 2");
+        const opts = {
+          screens: a._.slice(2),
+          lanes: a.lists.lane ?? [],
+          all: !!a.flags.all,
+          sheet: !!a.flags.sheet,
+          element: valueFlag(a, "element"),
+          scale: scale ? Number(scale) : undefined,
+          out: valueFlag(a, "out"),
+          dir: valueFlag(a, "dir"),
+        };
         for (const p of await shot(loadFeature(requireFeature(dir, f), f), opts, (m) => console.error(`design-flow: ${m}`))) console.log(p);
         return 0;
       }
@@ -322,17 +345,36 @@ export async function main(argv: string[]): Promise<number> {
         const loc = locale();
         const where = (t: Thread) => (flow ? describeAnchor(t.anchor, flow, loc) : "");
         const located = (t: Thread) => where(t) + lineNote(t.anchor);
+        // Shots first, so they print with their threads; without a browser the threads still print.
+        let shots = new Map<string, { file?: string; note?: string }>();
+        let sheets: string[] = [];
+        if (a.flags.shots && threads.length)
+          try {
+            const { loadFeature, commentShots } = await import("./visual.ts");
+            const r = await commentShots(loadFeature(fd, f), threads);
+            shots = new Map(r.shots.map((s) => [s.thread, s]));
+            sheets = r.sheets;
+          } catch (e) {
+            console.error(`design-flow: no shots: ${(e as Error).message}`);
+          }
         if (a.flags.json)
           console.log(
             JSON.stringify(
-              threads.map((t) => ({ ...t, seen: seenCount(t), where: where(t), unread: t.messages.some((m) => fresh.has(m.id)) })),
+              threads.map((t) => ({
+                ...t,
+                seen: seenCount(t),
+                where: where(t),
+                unread: t.messages.some((m) => fresh.has(m.id)),
+                ...(shots.get(t.id)?.file ? { shot: shots.get(t.id)!.file } : {}),
+              })),
               null,
               2,
             ),
           );
         else {
           if (!threads.length) console.log(a.flags.unread ? "No unread comments." : "No comments.");
-          for (const t of threads) printThread(t, located(t), fresh);
+          for (const t of threads) printThread(t, located(t), fresh, shots.get(t.id));
+          if (sheets.length) console.log(`All of them on ${sheets.length === 1 ? "one sheet" : `${sheets.length} sheets`}: ${sheets.join(" ")}`);
         }
         // Printed, so read: only now, so that a run that dies first leaves them unread.
         store.markRead(threads.map((t) => t.id));
@@ -434,7 +476,7 @@ export async function main(argv: string[]): Promise<number> {
       }
       case "hook": {
         const { hook, stopHook } = await import("./hook.ts");
-        return a.flags.stop ? await stopHook(dir, await stdinJson()) : await hook(dir);
+        return a.flags.stop ? await stopHook(dir, await stdinJson()) : await hook(dir, await stdinJson());
       }
       case undefined:
       case "help":
@@ -482,14 +524,34 @@ async function notify(dir: string, f: string) {
 
 /** How long watch collects comments after the first before it prints them together. */
 const WATCH_BATCH_MS = 2000;
+/** How often a watch looks for folders its session has started working on. */
+const LINK_SCAN_MS = 2000;
 
 function watchEvents(dir: string): Promise<number> {
+  const session = sessionId(process.env.CLAUDE_CODE_SESSION_ID);
+  const release = claimWatch(home(), session);
+  if (release === false) {
+    console.error("design-flow watch: this session already has a watch running, so this one ends");
+    return Promise.resolve(0);
+  }
   return new Promise((resolveExit) => {
     let stopped = false;
-    let first = true;
+    // Only a watcher's first connect starts or replaces the server, as open does. A later connect attaches to whatever
+    // server is up: a watcher left running across an update or a `stop` must not start its own build again. Waiting
+    // loses nothing, because the server replays unread comments when a watcher connects.
+    let starter = true;
+    let starting: Promise<unknown> | undefined;
     let waiting = false;
-    let socket: WebSocket | undefined;
-    let retry: ReturnType<typeof setTimeout> | undefined;
+    const sockets = new Set<WebSocket>();
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const later = (fn: () => void, ms: number) => {
+      if (stopped) return;
+      const t = setTimeout(() => {
+        timers.delete(t);
+        fn();
+      }, ms);
+      timers.add(t);
+    };
     // A user often leaves several comments in a row: they print as one batch, a line each.
     let batch: string[] = [];
     let batchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -499,60 +561,86 @@ function watchEvents(dir: string): Promise<number> {
       if (batch.length) console.log(batch.join("\n"));
       batch = [];
     };
-    const again = (ms: number) => {
-      if (!stopped) retry = setTimeout(connect, ms);
-    };
-    const connect = async () => {
-      let info: ServerInfo;
-      let key: string;
-      try {
-        // The first connect starts or replaces the server, as open does. A reconnect only attaches to whatever server is
-        // up: a watcher left running across an update or a `stop` must not start its own build again. Waiting loses
-        // nothing, because the server replays unread comments when a watcher connects.
-        const running = first ? undefined : await runningServer();
-        if (!first && !running) {
+    /** One folder's comments and approvals; a folder other than the session's own goes into the command to run. */
+    const follow = (project: string, own: boolean) => {
+      const elsewhere = own ? "" : ` --project-dir ${shellWord(project)}`;
+      const connect = async () => {
+        let info: ServerInfo;
+        let key: string;
+        try {
+          if (starting) await starting.catch(() => {});
+          let running: ServerInfo | undefined;
+          if (!starter) {
+            running = await runningServer();
+            if (!running) {
+              if (stopped) return;
+              if (!waiting) console.error("design-flow watch: no server running; waiting for one (design-flow open starts it)");
+              waiting = true;
+              later(connect, 1500);
+              return;
+            }
+          }
+          const attempt = register(project, running);
+          if (starter) starting = attempt;
+          ({ info, key } = await attempt);
+        } catch (e) {
           if (stopped) return;
-          if (!waiting) console.error("design-flow watch: no server running; waiting for one (design-flow open starts it)");
-          waiting = true;
-          again(1500);
+          console.error(`design-flow watch: ${(e as Error).message}; retrying`);
+          later(connect, 3000);
           return;
         }
-        ({ info, key } = await register(dir, running));
-      } catch (e) {
         if (stopped) return;
-        console.error(`design-flow watch: ${(e as Error).message}; retrying`);
-        again(3000);
-        return;
-      }
-      if (stopped) return;
-      first = false;
-      waiting = false;
-      const ws = new WebSocket(`ws://127.0.0.1:${info.port}/events?project=${key}`);
-      socket = ws;
-      ws.on("message", (data) => {
-        const m = JSON.parse(String(data));
-        if (m.type === "comment") {
-          batch.push(`[design-flow] ${m.feature} · ${m.first ? "new comment" : "reply"} #${m.thread} on ${m.where}: ${m.text} — run: design-flow comments ${m.feature}`);
-          batchTimer ??= setTimeout(flush, WATCH_BATCH_MS);
-        } else if (m.type === "approved")
-          console.log(`[design-flow] ${m.feature} · APPROVED (flow.yaml ${String(m.sha256).slice(0, 8)}) — you may start coding this feature.`);
-      });
-      ws.on("close", () => again(1500));
-      ws.on("error", () => {});
+        starter = false;
+        waiting = false;
+        const ws = new WebSocket(`ws://127.0.0.1:${info.port}/events?project=${key}`);
+        sockets.add(ws);
+        ws.on("message", (data) => {
+          const m = JSON.parse(String(data));
+          if (m.type === "comment") {
+            batch.push(`[design-flow] ${m.feature} · ${m.first ? "new comment" : "reply"} #${m.thread} on ${m.where}: ${m.text} — run: design-flow comments ${m.feature} --shots${elsewhere}`);
+            batchTimer ??= setTimeout(flush, WATCH_BATCH_MS);
+          } else if (m.type === "approved")
+            console.log(`[design-flow] ${m.feature} · APPROVED (flow.yaml ${String(m.sha256).slice(0, 8)}) — you may start coding this feature.`);
+        });
+        ws.on("close", () => {
+          sockets.delete(ws);
+          later(connect, 1500);
+        });
+        ws.on("error", () => {});
+      };
+      void connect();
     };
+    // The session's own folder once it holds canvases (registering a folder gives it a .design-flow directory, so a
+    // session opened elsewhere gets none), and each folder the session's commands link, as soon as they do.
+    const followed = new Set<string>();
+    const scan = () => {
+      const mine = canonical(dir);
+      if (!followed.has(mine) && existsSync(join(dir, ".design-flow"))) {
+        followed.add(mine);
+        follow(dir, true);
+      }
+      for (const p of linkedProjects(home(), session))
+        if (!followed.has(p)) {
+          followed.add(p);
+          follow(p, false);
+        }
+    };
+    const scanner = setInterval(scan, LINK_SCAN_MS);
     // SIGTERM or SIGINT ends the watch for good: no reconnect, and no socket or timer left to keep the process alive.
     const stop = () => {
       stopped = true;
       flush();
-      clearTimeout(retry);
-      socket?.terminate();
+      clearInterval(scanner);
+      for (const t of timers) clearTimeout(t);
+      for (const ws of sockets) ws.terminate();
+      release?.();
       process.off("SIGTERM", stop);
       process.off("SIGINT", stop);
       resolveExit(0);
     };
     process.on("SIGTERM", stop);
     process.on("SIGINT", stop);
-    void connect();
+    scan();
   });
 }
 

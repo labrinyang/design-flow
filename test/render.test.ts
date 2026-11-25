@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { parseFlow, type Flow } from "../src/core/flow.ts";
 import { describeTree, findElement, ownText } from "../src/cli/inspect.ts";
 import { findBrowser, launchBrowser, screenPage } from "../src/cli/render.ts";
+import { planSheets, tileSize } from "../src/cli/visual.ts";
 import { selectorFor } from "../src/core/selector.ts";
 import { screenDocument } from "../web/src/screen-doc.ts";
 
@@ -141,7 +142,7 @@ function project(flow = FLOW, prototype = PROTOTYPE) {
 /** The CLI with a temp dir of its own, so shots and browser profiles land where the test can look. */
 async function df(args: string[], cwd: string, opts: { bin?: string; temp?: string; env?: Record<string, string> } = {}) {
   const temp = opts.temp ?? mkdtempSync(join(tmpdir(), "df-render-tmp-"));
-  const env = { ...process.env, DESIGN_FLOW_HOME: join(temp, "home"), DESIGN_FLOW_PORT: "0", DESIGN_FLOW_LOCALE: "en", TMPDIR: temp, ...opts.env };
+  const env = { ...process.env, DESIGN_FLOW_HOME: join(temp, "home"), DESIGN_FLOW_PORT: "0", DESIGN_FLOW_LOCALE: "en", TMPDIR: temp, CLAUDE_CODE_SESSION_ID: "", ...opts.env };
   try {
     const r = await run(process.execPath, [opts.bin ?? BIN, ...args], { cwd, env });
     return { code: 0, out: r.stdout, err: r.stderr, temp };
@@ -152,7 +153,44 @@ async function df(args: string[], cwd: string, opts: { bin?: string; temp?: stri
 }
 const profiles = (temp: string) => readdirSync(temp).filter((n) => n.startsWith("design-flow-chrome-"));
 
+/** FLOW with A and B in lane main, C and W in lane side. */
+const LANES = FLOW.replace("title: Pay\n", "title: Pay\nlanes:\n  - { id: main, title: Main }\n  - { id: side, title: Side }\n")
+  .replace("{ id: A, title: Amount }", "{ id: A, title: Amount, lane: main }")
+  .replace("{ id: B, title: Broken }", "{ id: B, title: Broken, lane: main }")
+  .replace("{ id: C, title: Dialog }", "{ id: C, title: Dialog, lane: side }")
+  .replace("    title: Wide\n", "    title: Wide\n    lane: side\n");
+
+describe("sheets", () => {
+  it("draws phones 230 px wide and wider screens 660, and keeps a tall screen to the sheet", () => {
+    expect(tileSize({ width: 390, height: 844 })).toEqual({ w: 230, h: 498 });
+    expect(tileSize({ width: 1512, height: 898 })).toEqual({ w: 660, h: 392 });
+    expect(tileSize({ width: 390, height: 4000 })).toEqual({ w: 110, h: 1126 });
+  });
+
+  it("lays tiles out in rows, left to right, and starts a new sheet when the next row would not fit", () => {
+    const phones = planSheets(Array.from({ length: 12 }, () => ({ w: 230, h: 498 })));
+    expect(phones.map((p) => [p.width, p.height, p.items.length])).toEqual([
+      [1262, 1112, 10],
+      [524, 572, 2],
+    ]);
+    expect(phones[0].items.slice(4, 6)).toEqual([
+      { index: 4, x: 1008, y: 24, w: 230, h: 498 },
+      { index: 5, x: 24, y: 564, w: 230, h: 498 },
+    ]);
+    expect(planSheets(Array.from({ length: 6 }, () => ({ w: 660, h: 392 }))).map((p) => p.items.length)).toEqual([4, 2]);
+  });
+});
+
 describe("without a browser", () => {
+  it("comments --shots still prints the threads, and says why there are no shots", async () => {
+    const dir = project();
+    expect((await df(["ask", "pay", "A", "--text", "Is this the right total?"], dir)).code).toBe(0);
+    const r = await df(["comments", "pay", "--shots"], dir, { env: { DESIGN_FLOW_CHROME: join(dir, "no-such-browser") } });
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("Is this the right total?");
+    expect(r.err).toContain("design-flow: no shots:");
+  });
+
   it("check --visual says how to point at one, and still prints check's own issues", async () => {
     const dir = project(FLOW, PROTOTYPE.replace('<button data-id="pay">', '<button data-id="pay" data-to="Q">'));
     const r = await df(["check", "pay", "--visual"], dir, { env: { DESIGN_FLOW_CHROME: join(dir, "no-such-browser") } });
@@ -232,6 +270,35 @@ describe.skipIf(!browser)("rendering screens in headless Chrome", () => {
     expect(r.code, r.err).toBe(0);
     expect(r.out.trim().split("\n")).toEqual(["A", "B", "C", "W"].map((s) => join(out, `${s}.png`)));
     expect((await df(["shot", "pay", "--all", "--element", "h1"], dir)).code).toBe(2);
+  });
+
+  it("shot takes several screens and lanes' screens, each once, in the order given", async () => {
+    const dir = project(LANES);
+    const r = await df(["shot", "pay", "B", "--lane", "main", "--lane", "side", "--scale", "1"], dir);
+    expect(r.code, r.err).toBe(0);
+    const shots = join(r.temp, "design-flow-shots", "pay");
+    expect(r.out.trim().split("\n")).toEqual(["B", "A", "C", "W"].map((s) => join(shots, `${s}.png`)));
+    expect(pngSize(join(shots, "W.png"))).toEqual({ width: 800, height: 600 });
+    expect(profiles(r.temp)).toEqual([]);
+    expect((await df(["shot", "pay", "A", "--lane", "nope"], dir)).err).toContain("no lane nope in flow.yaml; its lanes are main, side");
+    expect((await df(["shot", "pay", "A", "B", "--out", "x.png"], dir)).code).toBe(2);
+    expect((await df(["shot", "pay", "A", "B", "--element", "h1"], dir)).code).toBe(2);
+    expect((await df(["shot", "pay", "--all", "--lane", "main"], dir)).code).toBe(2);
+  });
+
+  it("shot --sheet lays the screens out on a labelled sheet at 1x and leaves each screen's own PNG", async () => {
+    const dir = project();
+    const r = await df(["shot", "pay", "--all", "--sheet"], dir);
+    expect(r.code, r.err).toBe(0);
+    const shots = join(r.temp, "design-flow-shots", "pay");
+    expect(r.out.trim().split("\n")).toEqual([join(shots, "sheet-A-W.png")]);
+    const [page] = planSheets([...Array.from({ length: 3 }, () => tileSize({ width: 390, height: 844 })), tileSize({ width: 800, height: 600 })]);
+    expect(pngSize(join(shots, "sheet-A-W.png"))).toEqual({ width: page.width, height: page.height });
+    expect(pngSize(join(shots, "A.png"))).toEqual({ width: 390, height: 844 });
+    expect(r.err).toContain(`each screen's own PNG is in ${shots}`);
+    const out = await df(["shot", "pay", "A", "B", "--sheet", "--out", "s.png"], dir);
+    expect(out.out.trim()).toBe(join(realpathSync(dir), "s.png"));
+    expect(pngSize(join(dir, "s.png"))).toEqual(planSheets([tileSize({ width: 390, height: 844 }), tileSize({ width: 390, height: 844 })]).map((p) => ({ width: p.width, height: p.height }))[0]);
   });
 
   it("outline lists a screen's visible elements with refs, text, boxes, selectors and lines", async () => {
@@ -347,5 +414,38 @@ describe.skipIf(!browser)("ask", () => {
     const { layoutFlow } = await import("../src/core/layout.ts");
     const frame = (await layoutFlow(parseFlow(FLOW, "").flow!)).screens.A;
     expect(point.y).toBe(Math.round(frame.y + 844 * (frame.w / 390)));
+  });
+});
+
+describe.skipIf(!browser)("comments --shots", () => {
+  it("shoots each commented screen with its element ringed, and puts them all on one sheet", async () => {
+    const dir = project();
+    expect((await df(["ask", "pay", "A", "--text", "Pay now?", "--element", '[data-id="pay"]'], dir)).code).toBe(0);
+    expect((await df(["ask", "pay", "W", "--text", "Too wide?"], dir)).code).toBe(0);
+    const [onPay, onW] = JSON.parse(readFileSync(join(dir, ".design-flow", "pay", "comments.json"), "utf8")).threads.map((t: { id: string }) => t.id);
+    const r = await df(["comments", "pay", "--shots"], dir);
+    expect(r.code, r.err).toBe(0);
+    const shots = join(r.temp, "design-flow-shots", "pay");
+    expect(r.out).toContain(`#${onPay} [open] `);
+    expect(r.out).toContain(`  shot: ${join(shots, `comment-${onPay}.png`)}\n`);
+    expect(r.out).toContain(`  shot: ${join(shots, `comment-${onW}.png`)}\n`);
+    expect(r.out).toContain(`All of them on one sheet: ${join(shots, "comment-sheet.png")}`);
+    expect(pngSize(join(shots, `comment-${onPay}.png`))).toEqual({ width: 390, height: 844 });
+    expect(pngSize(join(shots, `comment-${onW}.png`))).toEqual({ width: 800, height: 600 });
+    // The ring is drawn on the shot, so it differs from the screen's own.
+    expect((await df(["shot", "pay", "A", "--scale", "1", "--out", "plain.png"], dir)).code).toBe(0);
+    expect(readFileSync(join(shots, `comment-${onPay}.png`)).equals(readFileSync(join(dir, "plain.png")))).toBe(false);
+    const json = JSON.parse((await df(["comments", "pay", "--shots", "--json"], dir)).out);
+    expect(json[0].shot).toMatch(new RegExp(`comment-${onPay}\\.png$`));
+  });
+
+  it("says when the commented element is gone, and makes no sheet for one shot", async () => {
+    const dir = project();
+    expect((await df(["ask", "pay", "A", "--text", "Pay now?", "--element", '[data-id="pay"]'], dir)).code).toBe(0);
+    writeFileSync(join(dir, ".design-flow", "pay", "prototype.html"), PROTOTYPE.replace('<button data-id="pay">Pay now</button>', ""));
+    const r = await df(["comments", "pay", "--shots"], dir);
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("(its element is gone; this is the screen as it is now)");
+    expect(r.out).not.toContain("All of them on");
   });
 });

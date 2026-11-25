@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -43,7 +43,8 @@ const bundledUp = () =>
     return i && i.build === bundledBuild() && (await healthy(i)) ? i : undefined;
   });
 const home = mkdtempSync(join(tmpdir(), "df-cli-home-"));
-const env = { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_PORT: "0", DESIGN_FLOW_LOCALE: "en" };
+// No CLAUDE_CODE_SESSION_ID from a Claude Code session running the tests: each test that wants one sets its own.
+const env = { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_PORT: "0", DESIGN_FLOW_LOCALE: "en", CLAUDE_CODE_SESSION_ID: "" };
 
 async function df(args: string[], cwd: string) {
   try {
@@ -380,6 +381,35 @@ describe("design-flow CLI", () => {
       }
     }
   }, 30000);
+
+  it("watch follows a canvas in another folder once a command of its session uses it, and a second watch of the session ends", async () => {
+    const own = project();
+    const other = project(FLOW);
+    const base = new URL((await df(["open", "pay", "--no-open"], other)).out.match(/http:\/\/\S+/)![0]).origin;
+    const session = `watch-${process.pid}-${Date.now()}`;
+    const senv = { ...env, CLAUDE_CODE_SESSION_ID: session };
+    const child = spawn(process.execPath, [BIN, "watch"], { cwd: own, env: senv });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    try {
+      await until("the watch to claim its session", () => existsSync(join(home, "watch", `${session}.pid`)) || undefined);
+      const second = await run(process.execPath, [BIN, "watch"], { cwd: own, env: senv, timeout: 10000 });
+      expect(second.stderr).toContain("this session already has a watch running");
+      await run(process.execPath, [BIN, "status", "pay", "--project-dir", other], { cwd: own, env: senv });
+      const p = await until("the other folder's project", () => registeredOn(other));
+      await fetch(`${base}/api/projects/${p.key}/features/pay/comments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ anchor: { type: "screen", screen: "A", point: { x: 0, y: 0 } }, text: "Follow the other folder" }),
+      });
+      await until("the watch line", () => out.includes("Follow the other folder") || undefined);
+      expect(out).toContain(`design-flow comments pay --shots --project-dir ${realpathSync(other)}`);
+      // The session's own folder holds no canvas, so the watch did not register it, which would have created one.
+      expect(existsSync(join(own, ".design-flow"))).toBe(false);
+    } finally {
+      child.kill();
+    }
+  });
 
   it("a fresh watch replaces a server of another build, as open does", async () => {
     const dir = project(FLOW);

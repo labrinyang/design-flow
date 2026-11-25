@@ -21,7 +21,7 @@ describe("packaged skill", () => {
     expect(existsSync(join(copy, "node_modules"))).toBe(false);
     const project = mkdtempSync(join(tmpdir(), "df-skill-proj-"));
     const home = mkdtempSync(join(tmpdir(), "df-skill-home-"));
-    const env = { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_PORT: "0", NODE_PATH: "" };
+    const env = { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_PORT: "0", NODE_PATH: "", CLAUDE_CODE_SESSION_ID: "" };
     const bin = join(copy, "scripts", "design-flow.mjs");
     try {
       const r = await run(process.execPath, [bin, "open", "signup", "--no-open"], { cwd: project, env });
