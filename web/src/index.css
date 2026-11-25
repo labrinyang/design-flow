@@ -27,8 +27,8 @@ body {
   --xy-background-color: var(--canvas);
   --xy-background-pattern-dots-color-default: var(--canvas-dot);
   --xy-edge-label-background-color: var(--canvas);
-  --xy-selection-background-color: color-mix(in oklab, var(--yellow-500) 10%, transparent);
-  --xy-selection-border: 1px dashed var(--yellow-500);
+  --xy-selection-background-color: color-mix(in oklab, var(--foreground) 6%, transparent);
+  --xy-selection-border: 1px dashed color-mix(in oklab, var(--foreground) 70%, transparent);
 }
 .react-flow__node {
   cursor: default;
@@ -61,7 +61,7 @@ body {
   cursor: crosshair;
 }
 [data-commenting="true"] [data-anchor]:not([data-anchor="edge"]):hover {
-  outline: calc(2px * var(--df-chrome, 1)) solid var(--yellow-500);
+  outline: calc(2px * var(--df-chrome, 1)) solid var(--foreground);
   outline-offset: calc(2px * var(--df-chrome, 1));
   border-radius: 6px;
 }
@@ -70,13 +70,13 @@ body {
 .df-edge[data-marked="true"] {
   stroke-opacity: 1 !important;
   stroke-width: 4px !important;
-  filter: drop-shadow(0 0 3px color-mix(in oklab, var(--yellow-500) 80%, transparent));
+  filter: drop-shadow(0 0 3px color-mix(in oklab, var(--foreground) 35%, transparent));
 }
 /* What a comment being written points at. */
 .df-marked [data-frame],
 .df-marked[data-anchor="lane"],
 .react-flow__node.df-marked > [data-anchor="lane"] {
-  outline: calc(2.5px * var(--df-chrome, 1)) solid var(--yellow-500);
+  outline: calc(2.5px * var(--df-chrome, 1)) solid var(--foreground);
   outline-offset: calc(3px * var(--df-chrome, 1));
 }
 /*
@@ -87,6 +87,16 @@ body {
 [data-pin] {
   transform: scale(var(--df-pin, 1));
   transform-origin: 50% 100%;
+}
+/*
+ * The pin of the comment you are on: ink like the others, set apart by a light gap and an ink ring,
+ * which read on the light canvas and on dark screens alike.
+ */
+[data-pin][data-active] {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px var(--foreground),
+    var(--shadow-3);
 }
 /* Going to a comment pulses its pin once. Two names, so the same pin can pulse again. */
 @keyframes df-pulse-a {

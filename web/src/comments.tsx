@@ -247,7 +247,7 @@ function MessageRow({ m, now, footer, children }: { m: Message; now: number; foo
   return (
     <ChatMessageLayout data-message data-author={m.author} aria-label={name}>
       <ChatMessageAvatar>
-        <ActorAvatar name={name} kind={agent ? "agent" : "person"} size="sm" />
+        <ActorAvatar name={name} kind={agent ? "agent" : "person"} size="sm" className={agent ? "bg-foreground text-background" : undefined} />
       </ChatMessageAvatar>
       <ChatMessageHeader>
         <span className="font-medium text-foreground">{name}</span>

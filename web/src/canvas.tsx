@@ -149,6 +149,7 @@ function Pins({
           key={th.id}
           type="button"
           data-pin
+          data-active={active === th.id || undefined}
           data-pulse={pulse?.id === th.id ? pulse.n % 2 : undefined}
           aria-label={t.pinLabel(i + 1, where.detail ? `${where.title} ${where.detail}` : where.title)}
           onClick={(e) => {
@@ -157,7 +158,7 @@ function Pins({
           }}
           className={
             "nodrag nopan absolute flex size-7 -translate-x-1/2 -translate-y-full items-center justify-center rounded-full rounded-bl-none text-[12px] font-medium tabular-nums shadow-3 transition-[scale] " +
-            (active === th.id ? "scale-110 bg-primary text-primary-foreground" : "bg-substrate text-substrate-hi")
+            (active === th.id ? "scale-110 bg-foreground text-background" : "bg-substrate text-substrate-hi")
           }
           style={{ left: at.x, top: at.y, pointerEvents: "all" }}
         >
@@ -865,7 +866,7 @@ function DraftAt({ point, children }: { point: Point; children: React.ReactNode 
       <span
         data-draft-marker
         className="pointer-events-none absolute z-20 size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-3"
-        style={{ left: marker.x, top: marker.y, background: "var(--yellow-500)" }}
+        style={{ left: marker.x, top: marker.y, background: "var(--foreground)" }}
       />
       <div ref={box} data-draft className="nowheel absolute z-20" style={{ ...pos, touchAction: "none" }}>
         {children}
