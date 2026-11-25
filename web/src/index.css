@@ -88,6 +88,60 @@ body {
   transform: scale(var(--df-pin, 1));
   transform-origin: 50% 100%;
 }
+/* Going to a comment pulses its pin once. Two names, so the same pin can pulse again. */
+@keyframes df-pulse-a {
+  50% {
+    scale: 1.3;
+  }
+}
+@keyframes df-pulse-b {
+  50% {
+    scale: 1.3;
+  }
+}
+[data-pin][data-pulse="0"] {
+  animation: df-pulse-a 420ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+[data-pin][data-pulse="1"] {
+  animation: df-pulse-b 420ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-pin][data-pulse] {
+    animation: none;
+  }
+}
+
+/*
+ * Screen labels and lane titles keep a readable size when zoomed out (--df-label, --df-lane; see zoom.ts),
+ * still as wide as their frame or lane. Far out, a label is one line, so it stays clear of the row above.
+ */
+[data-df-label] {
+  width: calc(var(--w) / var(--df-label, 1));
+  transform: scale(var(--df-label, 1));
+  transform-origin: 0 100%;
+}
+.react-flow[data-compact] [data-df-label] {
+  height: auto !important;
+  /* Into the gap beside the frame, short of the next column's label; backed with the canvas so it reads over the row above. */
+  width: max-content;
+  max-width: calc((var(--w) + 90px) / var(--df-label, 1));
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
+  padding: 0 4px 0 2px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--canvas) 88%, transparent);
+}
+.react-flow[data-compact] [data-df-label] [data-title] {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+[data-df-lane-title] {
+  max-width: calc((var(--w) - 48px) / var(--df-lane, 1));
+  transform: scale(var(--df-lane, 1));
+  transform-origin: 0 50%;
+}
 
 :root {
   --edge-success: var(--success);

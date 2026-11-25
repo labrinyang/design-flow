@@ -72,12 +72,18 @@ export function checkPrototype(p: Prototype, flow: Flow, file: string): Issue[] 
   return issues;
 }
 
-/** Give each screen without html/file its section from the prototype, and the prototype's <head> as shared style. */
+/**
+ * Give each screen without html/file its section from the prototype, with the line the section starts on, and the
+ * prototype's <head> as shared style.
+ */
 export function applyPrototype(flow: Flow, p: Prototype): Flow {
-  const byId = new Map(p.screens.map((s) => [s.id, s.html]));
+  const byId = new Map(p.screens.map((s) => [s.id, s]));
   return {
     ...flow,
     style: [flow.style, p.head].filter(Boolean).join("\n") || undefined,
-    screens: flow.screens.map((s) => (s.html === undefined && s.file === undefined && byId.has(s.id) ? { ...s, html: byId.get(s.id) } : s)),
+    screens: flow.screens.map((s) => {
+      const section = byId.get(s.id);
+      return s.html === undefined && s.file === undefined && section ? { ...s, html: section.html, htmlLine: section.line } : s;
+    }),
   };
 }

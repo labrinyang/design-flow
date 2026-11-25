@@ -158,6 +158,23 @@ describe("CommentStore", () => {
     expect(CommentStore.load(dir).threads[0].status).toBe("resolved");
   });
 
+  it("starts a thread with the agent's question, read from the start, and the user's answer unread", () => {
+    const dir = tmp();
+    const s = CommentStore.load(dir);
+    const t = s.ask({ type: "screen", screen: "P01", point: pt }, "Keep the amount when going back?", { options: ["Keep it", "Clear it"], recommended: 0 });
+    const saved = CommentStore.load(dir).threads[0];
+    expect(saved).toMatchObject({ id: t.id, status: "open", seen: 1 });
+    expect(saved.messages[0]).toMatchObject({ author: "agent", text: "Keep the amount when going back?", options: ["Keep it", "Clear it"], recommended: 0 });
+    expect(s.unread()).toEqual([]);
+    expect(s.resolveIfRead(t.id)).toEqual([]);
+    s.reopen(t.id);
+    s.pick(t.id, saved.messages[0].id, 1);
+    const answer = CommentStore.load(dir).unread();
+    expect(answer.map((d) => [d.text, d.first])).toEqual([["picked B: Clear it", false]]);
+    expect(() => s.ask({ type: "canvas", point: pt }, "?", { options: ["one"], recommended: 0 })).toThrow(RangeError);
+    expect(CommentStore.load(dir).threads).toHaveLength(1);
+  });
+
   it("rejects unknown thread ids", () => {
     const s = CommentStore.load(tmp());
     expect(() => s.reply("nope", "agent", "x")).toThrow(/nope/);

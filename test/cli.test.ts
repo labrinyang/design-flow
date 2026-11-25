@@ -234,12 +234,125 @@ describe("design-flow CLI", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ anchor: { type: "screen", screen: "B", point: { x: 0, y: 0 } }, text: "Show the receipt" }),
     });
-    for (let i = 0; i < 30 && !out.includes("Show the receipt"); i++) await new Promise((r) => setTimeout(r, 100));
+    // Comments print in batches, 2 s after the first.
+    for (let i = 0; i < 60 && !out.includes("Show the receipt"); i++) await new Promise((r) => setTimeout(r, 100));
     child.kill();
     const lines = out.trim().split("\n").filter((l) => l.includes("Show the receipt"));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("[design-flow] pay");
     expect(lines[0]).toContain("Screen B Done");
+  });
+
+  it("watch prints comments that come close together as one batch, and an approval at once", async () => {
+    const dir = project(FLOW);
+    const base = new URL((await df(["open", "pay", "--no-open"], dir)).out.match(/http:\/\/\S+/)![0]).origin;
+    const child = spawn(process.execPath, [BIN, "watch"], { cwd: dir, env });
+    const chunks: { at: number; text: string }[] = [];
+    child.stdout.on("data", (d) => chunks.push({ at: Date.now(), text: String(d) }));
+    const out = () => chunks.map((c) => c.text).join("");
+    try {
+      const p = await until("watch to register", () => registeredOn(dir));
+      const f = `${base}/api/projects/${p.key}/features/pay`;
+      const post = (path: string, body: unknown) => fetch(f + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const first = Date.now();
+      await post("/comments", { anchor: { type: "screen", screen: "A", point: { x: 0, y: 0 } }, text: "First note" });
+      await sleep(600);
+      await post("/comments", { anchor: { type: "screen", screen: "B", point: { x: 0, y: 0 } }, text: "Second note" });
+      await until("the batch", () => (out().includes("Second note") ? true : undefined));
+      const batch = chunks.find((c) => c.text.includes("First note"))!;
+      expect(batch.text).toContain("Second note");
+      expect(batch.at - first).toBeGreaterThanOrEqual(1900);
+      expect(batch.text.trim().split("\n")).toHaveLength(2);
+      const { sha256 } = await (await fetch(f)).json();
+      const asked = Date.now();
+      await post("/approve", { sha256 });
+      await until("the approval", () => (out().includes("APPROVED") ? true : undefined));
+      expect(chunks.find((c) => c.text.includes("APPROVED"))!.at - asked).toBeLessThan(1500);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("ask starts a thread as the agent, and the user's answer arrives like any reply", async () => {
+    const dir = project(FLOW);
+    const base = new URL((await df(["open", "pay", "--no-open"], dir)).out.match(/http:\/\/\S+/)![0]).origin;
+    for (const bad of [
+      ["ask", "pay", "B"],
+      ["ask", "pay", "--text", "Which?"],
+      ["ask", "pay", "Z", "--text", "Which?"],
+      ["ask", "pay", "B", "--text", "Which?", "--option", "Only one", "--recommend", "A"],
+      ["ask", "pay", "B", "--text", "Which?", "--option", "Yes", "--option", "No"],
+    ])
+      expect((await df(bad, dir)).code, bad.join(" ")).toBe(2);
+    const asked = await df(["ask", "pay", "B", "--text", "Show a receipt here?", "--option", "Yes", "--option", "No", "--recommend", "A"], dir);
+    expect(asked.code, asked.err).toBe(0);
+    const id = asked.out.match(/^Asked #(\w{8}) on Screen B Done\.\n$/)![1];
+    const file = join(dir, ".design-flow", "pay", "comments.json");
+    const t = JSON.parse(readFileSync(file, "utf8")).threads[0];
+    expect(t).toMatchObject({ id, seen: 1, status: "open", anchor: { type: "screen", screen: "B" }, messages: [{ author: "agent", options: ["Yes", "No"], recommended: 0 }] });
+    expect(Number.isFinite(t.anchor.point.x) && Number.isFinite(t.anchor.point.y)).toBe(true);
+    expect((await df(["status", "pay"], dir)).out).toBe("draft · 1 open thread\n");
+    expect((await df(["comments", "pay", "--unread"], dir)).out).toBe("No unread comments.\n");
+    const child = spawn(process.execPath, [BIN, "watch"], { cwd: dir, env });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    try {
+      const p = await until("watch to register", () => registeredOn(dir));
+      await fetch(`${base}/api/projects/${p.key}/features/pay/threads/${id}/pick`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: t.messages[0].id, option: 0 }),
+      });
+      await until("the watch line", () => out.includes("picked A: Yes") || undefined);
+      expect(out).toContain(`reply #${id} on Screen B Done: picked A: Yes`);
+    } finally {
+      child.kill("SIGKILL");
+    }
+    expect((await df(["status", "pay"], dir)).out).toBe("draft · 1 open thread (1 unread)\n");
+    expect((await df(["comments", "pay", "--unread"], dir)).out).toBe(
+      `#${id} [open] Screen B Done\n  agent: Show a receipt here?\n    A. Yes (recommended)\n    B. No\n  user  (new): picked A: Yes\n`,
+    );
+    expect((await df(["comments", "pay", "--unread"], dir)).out).toBe("No unread comments.\n");
+  });
+
+  it("outline lists the flow without rendering, with each screen's open and unread threads, and marks nothing read", async () => {
+    const dir = project(FLOW);
+    const { CommentStore } = await import("../src/core/comments.ts");
+    const store = CommentStore.load(join(dir, ".design-flow", "pay"));
+    store.addThread({ type: "element", screen: "A", selector: "h1", tag: "h1", text: "Pay", point: { x: 0, y: 0 } }, "Bigger");
+    store.ask({ type: "screen", screen: "B", point: { x: 0, y: 0 } }, "Receipt?");
+    store.addThread({ type: "edge", edge: { from: "A", to: "B" }, point: { x: 0, y: 0 } }, "What if it fails?");
+    const r = await df(["outline", "pay"], dir);
+    expect(r).toMatchObject({
+      code: 0,
+      out: [
+        "Pay",
+        "viewport 390x844",
+        "screens",
+        "  A  Amount  (no lane)  390x844  1 open, 1 unread",
+        "  B  Done    (no lane)  390x844  1 open",
+        "edges",
+        "  A → B  Pay",
+        "threads on edges, lanes or the canvas: 1 open, 1 unread",
+        "",
+      ].join("\n"),
+    });
+    const json = JSON.parse((await df(["outline", "pay", "--json"], dir)).out);
+    expect(json.screens[0]).toEqual({ id: "A", title: "Amount", lane: null, viewport: { width: 390, height: 844 }, open: 1, unread: 1 });
+    expect(json.edges).toEqual([{ from: "A", to: "B", label: "Pay" }]);
+    expect(CommentStore.load(join(dir, ".design-flow", "pay")).unread()).toHaveLength(2);
+  });
+
+  it("comments names the prototype.html line of an element anchor that has one", async () => {
+    const dir = project(FLOW);
+    const { CommentStore } = await import("../src/core/comments.ts");
+    const anchor = { type: "element" as const, screen: "A", selector: '[data-id="pay"]', tag: "button", text: "Pay", point: { x: 0, y: 0 } };
+    CommentStore.load(join(dir, ".design-flow", "pay")).addThread({ ...anchor, line: 12 }, "Bigger");
+    CommentStore.load(join(dir, ".design-flow", "pay")).addThread(anchor, "Rounder");
+    const out = (await df(["comments", "pay"], dir)).out;
+    expect(out).toContain('[open] Screen A Amount · button "Pay" ([data-id="pay"]) prototype.html:12\n  user  (new): Bigger');
+    expect(out).toContain('[open] Screen A Amount · button "Pay" ([data-id="pay"])\n  user  (new): Rounder');
+    expect(JSON.parse((await df(["comments", "pay", "--json"], dir)).out)[0].anchor.line).toBe(12);
   });
 
   // On Windows kill() ends a process outright, so there is no handler to test.

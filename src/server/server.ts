@@ -8,7 +8,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { approvalStatus, approve, hashFlow, hashSpec, unseenApproval } from "../core/approval.ts";
-import { CommentStore, describeAnchor, isOrphan, seenCount, type Anchor, type Locale } from "../core/comments.ts";
+import { CommentStore, describeAnchor, isOrphan, seenCount, type Anchor, type ElementAnchor, type Locale } from "../core/comments.ts";
 import { parseFlow, type Flow, type Issue } from "../core/flow.ts";
 import { layoutFlow, type Overrides } from "../core/layout.ts";
 import { applyPrototype, checkPrototype, readPrototype } from "../core/prototype.ts";
@@ -47,7 +47,7 @@ interface Project {
 }
 
 /** Replace each `file:` screen with its HTML; a missing file becomes an issue. */
-function inlineScreens(flow: Flow | undefined, dir: string, flowFile: string, issues: Issue[]): Flow | undefined {
+export function inlineScreens(flow: Flow | undefined, dir: string, flowFile: string, issues: Issue[]): Flow | undefined {
   if (!flow) return flow;
   return {
     ...flow,
@@ -86,6 +86,29 @@ function validAnchor(a: unknown): a is Anchor {
     default:
       return false;
   }
+}
+
+const within = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+const record = (v: unknown): Record<string, unknown> | undefined => (v && typeof v === "object" ? (v as Record<string, unknown>) : undefined);
+
+/**
+ * A new comment's anchor as it is stored, or undefined when a field it needs is missing or wrong. An element
+ * anchor's optional fields (box, offset, near, line) are kept only when they make sense; one that does not is
+ * dropped, and the comment still goes in.
+ */
+export function cleanAnchor(a: unknown): Anchor | undefined {
+  if (!validAnchor(a)) return undefined;
+  if (a.type !== "element") return a;
+  const { box, offset, near, line, ...rest } = a;
+  const out: ElementAnchor = rest;
+  const b = record(box);
+  if (b && within(b.x, -1e5, 1e5) && within(b.y, -1e5, 1e5) && within(b.width, 0, 1e5) && within(b.height, 0, 1e5))
+    out.box = { x: b.x, y: b.y, width: b.width, height: b.height };
+  const o = record(offset);
+  if (o && within(o.x, 0, 1) && within(o.y, 0, 1)) out.offset = { x: o.x, y: o.y };
+  if (typeof near === "string" && near.trim() && near.length <= 120) out.near = near;
+  if (Number.isInteger(line) && within(line, 1, 1e7)) out.line = line;
+  return out;
 }
 
 const featuresRoot = (p: Project) => join(p.dir, ".design-flow");
@@ -397,8 +420,9 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     } else if (action === "comments" && m === "POST") {
       const b = (await body(req)) as { anchor: unknown; text: unknown };
       if (typeof b.text !== "string" || !b.text.trim()) throw new HttpError(400, "empty comment");
-      if (!validAnchor(b.anchor)) throw new HttpError(400, "invalid comment anchor");
-      CommentStore.load(dir).addThread(b.anchor, b.text.trim());
+      const anchor = cleanAnchor(b.anchor);
+      if (!anchor) throw new HttpError(400, "invalid comment anchor");
+      CommentStore.load(dir).addThread(anchor, b.text.trim());
     } else if (action === "threads" && parts[5] && m === "POST") {
       const op = parts[6];
       const b = op === "reply" || op === "pick" ? await body(req) : {};

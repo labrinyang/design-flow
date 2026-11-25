@@ -1,18 +1,25 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { t } from "./i18n.ts";
 import { LABEL_H, NOTE_H, type LaneNode, type ScreenNode } from "./model.ts";
-import { acceptFrameMessage, acceptFrameWheel, frameToClient, screenDocument, viewportOf, type FrameWheelData } from "./screen-doc.ts";
+import type { FrameElement } from "./anchor.ts";
+import { acceptFrameLocated, acceptFrameMessage, acceptFrameWheel, frameToClient, screenDocument, viewportOf, type FrameWheelData, type Located } from "./screen-doc.ts";
 
 export interface FrameClick {
   screen: string;
   /** Viewport (CSS px inside the frame) of the click. */
   x: number;
   y: number;
-  element: { selector: string; tag: string; text: string } | null;
+  element: FrameElement | null;
 }
 
-/** Click reports from every frame go through one listener on the canvas. */
+/** Where commented elements are in one screen's frame now. */
+export interface FrameLocated {
+  screen: string;
+  items: Located[];
+}
+
+/** Reports from every frame go through one listener on the canvas: "comment" (a commenting click) and "located". */
 export const frameEvents = new EventTarget();
 const frames = new Map<string, { screen: string; window: () => Window | null | undefined; element: () => HTMLIFrameElement | null }>();
 
@@ -20,9 +27,47 @@ if (typeof window !== "undefined")
   window.addEventListener("message", (e) => {
     const click = acceptFrameMessage(e, frames);
     if (click) return void frameEvents.dispatchEvent(new CustomEvent<FrameClick>("comment", { detail: click }));
+    const located = acceptFrameLocated(e, frames);
+    if (located) return void frameEvents.dispatchEvent(new CustomEvent<FrameLocated>("located", { detail: located }));
     const wheel = acceptFrameWheel(e, frames);
     if (wheel) replayWheel(wheel);
   });
+
+/**
+ * What the canvas has asked of each screen's frame, kept so a frame that loads again (after an edit) is
+ * told again: whether its motion is paused, and which commented elements to report on.
+ */
+const paused = new Set<string>();
+const asked = new Map<string, { id: string; selector: string }[]>();
+let ringed: { screen: string; selector: string } | undefined;
+
+function postTo(screen: string, message: Record<string, unknown>) {
+  for (const [channel, f] of frames) if (f.screen === screen) f.window()?.postMessage({ channel, ...message }, "*");
+}
+
+/** Play or pause a screen's animations. */
+export function setFrameMotion(screen: string, on: boolean) {
+  if (on !== paused.has(screen)) return;
+  if (on) paused.delete(screen);
+  else paused.add(screen);
+  postTo(screen, { type: "motion", on });
+}
+
+/** Ask each screen's frame where these elements are; frames answer now and whenever their page changes. */
+export function locateInFrames(items: Map<string, { id: string; selector: string }[]>) {
+  for (const screen of new Set([...asked.keys(), ...items.keys()])) {
+    const next = items.get(screen) ?? [];
+    if (JSON.stringify(next) === JSON.stringify(asked.get(screen) ?? [])) continue;
+    if (next.length) asked.set(screen, next);
+    else asked.delete(screen);
+    postTo(screen, { type: "locate", items: next });
+  }
+}
+
+/** Ring one element in a screen's frame for a moment. */
+export function flashInFrame(screen: string, selector: string) {
+  postTo(screen, { type: "flash", selector });
+}
 
 /**
  * Replay a wheel or pinch from inside a frame on the frame's box, at the same spot on the page.
@@ -52,6 +97,7 @@ function replayWheel(w: FrameWheelData) {
 
 /** Ring one element inside a screen's frame (or clear every frame's ring with no screen). */
 export function highlightInFrame(screen: string | undefined, selector: string | undefined) {
+  ringed = screen && selector ? { screen, selector } : undefined;
   for (const [channel, f] of frames)
     f.window()?.postMessage({ channel, type: "highlight", selector: f.screen === screen ? (selector ?? null) : null }, "*");
 }
@@ -63,7 +109,7 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
   const h = data.height;
   const scale = w / vp.width;
   const channel = useMemo(() => `${screen.id}:${Math.random().toString(36).slice(2)}`, [screen.id]);
-  const doc = useMemo(() => screenDocument(flow, screen, { channel }), [flow.style, flow.viewport, screen.html, screen.viewport, channel]);
+  const doc = useMemo(() => screenDocument(flow, screen, { channel }), [flow.style, flow.viewport, screen.html, screen.htmlLine === undefined, screen.viewport, channel]);
   const frame = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
@@ -79,6 +125,21 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
     return () => el?.removeEventListener("load", post);
   }, [commenting, channel, doc]);
 
+  // A frame that loads again starts over: tell it again whether to pause, what to report on, and what to ring.
+  useEffect(() => {
+    const el = frame.current;
+    const again = () => {
+      const win = el?.contentWindow;
+      if (!win) return;
+      if (paused.has(screen.id)) win.postMessage({ channel, type: "motion", on: false }, "*");
+      const items = asked.get(screen.id);
+      if (items) win.postMessage({ channel, type: "locate", items }, "*");
+      if (ringed?.screen === screen.id) win.postMessage({ channel, type: "highlight", selector: ringed.selector }, "*");
+    };
+    el?.addEventListener("load", again);
+    return () => el?.removeEventListener("load", again);
+  }, [channel, screen.id]);
+
   return (
     <div data-tone={tone} className="relative" style={{ width: w, height: h }}>
       <Handle id="in-left" type="target" position={Position.Left} />
@@ -88,13 +149,16 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
       <div
         data-anchor="screen"
         data-screen={screen.id}
-        className="absolute inset-x-0 flex flex-col justify-end pb-1.5 text-[14px] leading-tight"
-        style={{ top: -LABEL_H, height: LABEL_H }}
+        data-df-label
+        className="absolute bottom-full left-0 flex flex-col justify-end pb-1.5 text-[14px] leading-tight"
+        style={{ height: LABEL_H, "--w": `${w}px` } as CSSProperties}
       >
-        <span className="text-[12px] font-medium tracking-wide tabular-nums" style={{ color: "var(--tone)" }}>
+        <span data-id className="shrink-0 text-[12px] font-medium tracking-wide tabular-nums" style={{ color: "var(--tone)" }}>
           {screen.id}
         </span>
-        <span className="truncate text-foreground">{screen.title}</span>
+        <span data-title className="min-w-0 truncate text-foreground">
+          {screen.title}
+        </span>
       </div>
       <div
         data-anchor="screen"
@@ -155,8 +219,9 @@ export function LaneNodeView({ data }: NodeProps<LaneNode>) {
       }}
     >
       <div
-        className="absolute -top-3.5 left-6 flex items-baseline gap-3 px-2.5 text-[18px] font-medium"
-        style={{ color: "var(--tone)", background: "var(--canvas)" }}
+        data-df-lane-title
+        className="absolute -top-3.5 left-6 flex items-baseline gap-3 overflow-hidden px-2.5 text-[18px] font-medium whitespace-nowrap"
+        style={{ color: "var(--tone)", background: "var(--canvas)", "--w": `${width}px` } as CSSProperties}
       >
         {lane.title}
         {lane.enter === "any" && <span className="text-[12px] font-normal text-muted-foreground">{t.enterAny}</span>}

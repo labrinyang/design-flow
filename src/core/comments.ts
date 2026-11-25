@@ -10,11 +10,27 @@ export interface Point {
 }
 export type Anchor =
   /** An element inside a screen's HTML: a CSS selector from the screen's body, plus what it showed. */
-  | { type: "element"; screen: string; selector: string; tag: string; text: string; point: Point }
+  | {
+      type: "element";
+      screen: string;
+      selector: string;
+      tag: string;
+      text: string;
+      point: Point;
+      /** The element's box when the comment was made, in the screen's page CSS px: its client rect plus the scroll. */
+      box?: { x: number; y: number; width: number; height: number };
+      /** Where in that box the comment points, each 0 to 1. */
+      offset?: Point;
+      /** Up to 120 characters of the text around the element. */
+      near?: string;
+      /** The prototype.html line its tag starts on. */
+      line?: number;
+    }
   | { type: "screen"; screen: string; point: Point }
   | { type: "edge"; edge: { from: string; to: string; index?: number }; point: Point }
   | { type: "lane"; lane: string; point: Point }
   | { type: "canvas"; point: Point; near?: string };
+export type ElementAnchor = Extract<Anchor, { type: "element" }>;
 
 export type Author = "user" | "agent";
 export interface Message {
@@ -101,6 +117,19 @@ function checkOffer(o: Offer) {
     if (v !== undefined && (!Number.isInteger(v) || v < 0 || v >= n)) throw new RangeError(`${k} must be the index of one of the options`);
   }
   if (o.recommended === undefined && o.applied === undefined) throw new RangeError("say which option you recommend, or which one you applied");
+}
+
+/** A new message; an agent's can carry an offer. */
+function newMessage(author: Author, text: string, offer?: Offer): Message {
+  const m: Message = { id: randomUUID().slice(0, 8), author, text, at: new Date().toISOString() };
+  if (offer) {
+    if (author !== "agent") throw new RangeError("only the agent offers options");
+    checkOffer(offer);
+    m.options = offer.options.map((x) => x.trim());
+    if (offer.recommended !== undefined) m.recommended = offer.recommended;
+    if (offer.applied !== undefined) m.applied = offer.applied;
+  }
+  return m;
 }
 
 /** The edge at `index` when it still joins the same screens, else the first edge between them. */
@@ -246,16 +275,20 @@ export class CommentStore {
     return t;
   }
 
+  /**
+   * A thread the agent starts, to ask the user something on the canvas. Its first message is the agent's own, so it
+   * counts as read; the user's answer, typed or picked, is unread as usual.
+   */
+  ask(anchor: Anchor, text: string, offer?: Offer): Thread {
+    const m = newMessage("agent", text, offer);
+    const t: Thread = { id: randomUUID().slice(0, 8), anchor, status: "open", createdAt: m.at, messages: [m], seen: 1 };
+    this.mutate((ts) => ts.push(t));
+    return t;
+  }
+
   /** Append a message; an agent's can carry an offer. A user's reopens a resolved thread. */
   reply(threadId: string, author: Author, text: string, offer?: Offer): Message {
-    const m: Message = { id: randomUUID().slice(0, 8), author, text, at: new Date().toISOString() };
-    if (offer) {
-      if (author !== "agent") throw new RangeError("only the agent offers options");
-      checkOffer(offer);
-      m.options = offer.options.map((x) => x.trim());
-      if (offer.recommended !== undefined) m.recommended = offer.recommended;
-      if (offer.applied !== undefined) m.applied = offer.applied;
-    }
+    const m = newMessage(author, text, offer);
     this.mutate((ts) => {
       const t = CommentStore.find(ts, threadId);
       t.messages.push(m);

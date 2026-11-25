@@ -55,7 +55,7 @@ claude plugin marketplace add stvlynn/design-flow
 claude plugin install design-flow@design-flow
 ```
 
-The plugin adds a prompt hook (unread comments and approvals are attached to your next message) and a monitor that streams them into the session. It loads in the next session, or after `/reload-plugins`. Plugin monitors need a recent Claude Code; on older versions the prompt hook still delivers comments.
+The plugin adds a prompt hook (unread comments and approvals are attached to your next message), a stop hook (an agent about to stop while you have comments it has not read goes on to read them) and a monitor that streams them into the session. It loads in the next session, or after `/reload-plugins`. Plugin monitors need a recent Claude Code; on older versions the prompt hook still delivers comments.
 
 ## Use it
 
@@ -90,6 +90,10 @@ The agent picks a feature name, runs `design-flow open sign-up`, and writes `.de
 
 Scroll to pan; ⌘-scroll, Ctrl-scroll or pinch to zoom, up to 800%, wherever the pointer is. ⌘+ and ⌘− zoom too (Ctrl on Windows and Linux), ⌘0 fits the whole flow in the window, and **Actual size** in the zoom menu shows screens at their real size. While you comment, scrolling over a screen that is longer than its frame scrolls that screen first, then the canvas. Drag a frame to move it; Design Flow remembers it, and **Re-layout** puts everything back.
 
+Press ⌘K (Ctrl K) to find a screen by its id, name or lane and go straight to it. The minimap in the corner shows where you are in the flow; click or drag in it to move, or turn it off in the zoom menu. Zoomed out, screen ids and lane titles keep a readable size. The address bar follows you: it links the screen in the middle of the window (`#screen=S02`) or the comment you opened (`#thread=4a95ec3d`), so a copied link opens the canvas right there.
+
+Screens play their animations only while they are on screen and at least about 160 × 100 px there; smaller or hidden ones pause until you zoom in, so a large flow sits idle instead of keeping the CPU busy.
+
 ### 3. Comment on anything
 
 Press <kbd>C</kbd> and click: a button inside a screen, a screen's title, an arrow, a lane or empty canvas.
@@ -106,7 +110,11 @@ The agent receives it where it is anchored:
 
 It changes `flow.yaml`, replies with `design-flow reply`, and resolves the thread when it is settled. Its reply appears under your comment; the canvas redraws as soon as the file changes. Until it answers, your last message says whether the agent has read it. A comment counts as read once a command the agent ran has shown it the text; a background watcher receiving it does not count, so a comment is never lost to a watcher nobody reads.
 
-When the choice is yours to make, the agent replies with two to four options and marks the one it recommends; a click sends your pick back as your answer. When it can tell what you would likely want, it applies that and offers the other way as an option marked **Applied**, so changing course is one click too.
+When the choice is yours to make, the agent replies with two to four options and marks the one it recommends; a click sends your pick back as your answer. When it can tell what you would likely want, it applies that and offers the other way as an option marked **Applied**, so changing course is one click too. After your pick the options fold into one line naming it, which opens them again if you change your mind.
+
+The comment panel lists open threads with the numbers of their pins. Each names its screen and element in plain words (the ids are in its tooltip); click the name to go there, and the element flashes once. **Resolved** shows settled threads one line each, and **New** shows threads with agent replies you have not seen yet: a divider marks the first of them, and the comment button in the toolbar counts those threads. Pins stay on their element when the agent changes the screen, and a pin whose element is gone stays where you clicked.
+
+The agent can start a thread as well. When a screen it draws depends on something only you know, such as a business rule or a priority, it asks on the canvas, pinned to that screen or element, with its options and the one it recommends.
 
 ### 4. Approve
 
@@ -149,15 +157,23 @@ node .claude/skills/design-flow/scripts/design-flow.mjs <command>
 | Command | Does |
 | --- | --- |
 | `open <feature> [--no-open]` | Start the server, write a commented template if `flow.yaml` is missing, open the canvas |
-| `check <feature>` | Validate; prints `file:line:col`, the problem and a fix; exit 0 clean, 3 with issues |
+| `check <feature> [--visual]` | Validate; prints `file:line:col`, the problem and a fix; exit 0 clean, 3 with issues. `--visual` also renders every screen and reports content wider than the screen, text cut off and text over text |
+| `shot <feature> <screen> [--element <selector>] [--scale 1\|2] [--out <file>]` | A PNG of a screen, or of one element, at 2× by default, in the temp directory unless `--out`; prints its path |
+| `shot <feature> --all [--dir <dir>]` | A PNG of every screen |
+| `outline <feature> [<screen>] [--json]` | The flow as text: screens, edges, open and unread threads. With a screen: its rendered elements, with boxes, selectors and `prototype.html` lines |
 | `comments <feature> [--unread] [--json]` | Threads, where each is anchored, and who said what; what it shows counts as read |
 | `reply <feature> <thread> --text "…" [--option "…"]… [--recommend A] [--applied A]` | Reply as the agent, with two to four options you pick on the canvas if it gives them |
+| `ask <feature> <screen> --text "…" [--element <selector>] [--option "…"]… [--recommend A] [--applied A]` | Start a thread as the agent, on a screen or one of its elements |
 | `resolve <feature> <thread>` | Resolve a thread the agent has read to the end |
 | `status <feature>` | `draft`, `approved` or `stale`, open and unread threads |
-| `watch` | One line per new comment or approval |
+| `watch` | One line per new comment or approval; comments made close together print together |
 | `list` / `stop` | Features in this project / stop the server |
 
 Every command takes `--project-dir <path>`; the default is the current directory. Add `?lang=en` or `?lang=zh` to a canvas URL to pick the interface language.
+
+### Letting the agent see the screens
+
+An agent writes each screen's HTML without seeing it. `check --visual`, `shot` and `outline <feature> <screen>` render screens the way the canvas does, at their viewport, in headless Chrome, Chromium, Edge or Brave, whichever is installed; set `DESIGN_FLOW_CHROME` to a browser's executable to choose one. Each run starts a fresh browser with a throwaway profile and closes it when done. Shots go to the system's temp directory, never into your project.
 
 ## flow.yaml
 

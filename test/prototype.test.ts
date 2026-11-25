@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseFlow, type Flow } from "../src/core/flow.ts";
-import { checkPrototype, readPrototype } from "../src/core/prototype.ts";
+import { applyPrototype, checkPrototype, readPrototype } from "../src/core/prototype.ts";
 
 const doc = `<!doctype html>
 <html><head>
@@ -74,6 +74,20 @@ edges:
 `,
   "flow.yaml",
 ).flow as Flow;
+
+describe("applyPrototype", () => {
+  it("gives each screen its section and the prototype.html line the section starts on", () => {
+    const withOwn = { ...flow, screens: flow.screens.map((s) => (s.id === "S02" ? { ...s, html: "<p>own</p>" } : s)) };
+    const screens = applyPrototype(withOwn, readPrototype(doc)).screens;
+    expect(screens.map((s) => [s.id, s.htmlLine])).toEqual([
+      ["W00", 7],
+      ["S01", 8],
+      ["S02", undefined],
+      ["S03", undefined],
+    ]);
+    expect(screens[1].html).toMatch(/^<section data-screen="S01" class="pad">/);
+  });
+});
 
 describe("checkPrototype", () => {
   it("reports jumps to unknown screens, sections for unknown screens, and screens with no section", () => {

@@ -30,6 +30,17 @@ export const PIN_MIN_PX = 22;
 export const pinScale = (zoom: number) => Math.min(Math.max(zoom, PIN_MIN_PX / PIN_PX), 1) / zoom;
 
 /**
+ * Screen labels and lane titles stop shrinking with the canvas at a readable size, as pins do. A screen's
+ * label keeps its 100% size on screen below 100% (12px for the id); a lane title shrinks from 18px to 14px, then holds.
+ */
+export const labelScale = (zoom: number) => Math.max(1, 1 / zoom);
+export const LANE_TITLE_PX = 18;
+export const LANE_TITLE_MIN_PX = 14;
+export const laneTitleScale = (zoom: number) => Math.max(1, LANE_TITLE_MIN_PX / (LANE_TITLE_PX * zoom));
+/** Below this zoom a screen's id and title share one line, so the label does not reach up into the row above. */
+export const COMPACT_LABEL_ZOOM = 0.6;
+
+/**
  * log2 of the zoom change for one wheel event with Ctrl or ⌘ held; a trackpad pinch arrives as Ctrl + wheel.
  * Ctrl and ⌘ zoom alike, and no single event zooms more than one press of +.
  */
@@ -71,6 +82,15 @@ export function fitViewport(
     y: insets.top + (h - bounds.height * zoom) / 2 - bounds.y * zoom,
     zoom,
   };
+}
+
+/**
+ * The zoom that shows one frame (with its label) comfortably: most of the canvas's height and no more than
+ * most of its width, and never past the screen's real size.
+ */
+export function focusZoom(box: { w: number; h: number }, canvas: { width: number; height: number }, realSize: number): number {
+  const zoom = Math.min((canvas.width * 0.6) / Math.max(1, box.w), (canvas.height * 0.8) / Math.max(1, box.h), realSize);
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
 }
 
 /**

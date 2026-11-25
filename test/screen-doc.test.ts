@@ -31,6 +31,12 @@ describe("screenDocument", () => {
     expect(screenDocument(flow, flow.screens[1], { channel: "x" })).toContain("width=1280");
   });
 
+  it("marks a prototype section's tags with lines counted from the section's start", () => {
+    const doc = screenDocument(flow, { ...flow.screens[0], html: '<section data-screen="A">\n<p>x</p></section>', htmlLine: 40 }, { channel: "x" });
+    expect(doc).toContain('<section data-df-line="1" data-screen="A">\n<p data-df-line="2">x</p></section>');
+    expect(screenDocument(flow, flow.screens[0], { channel: "x" })).not.toContain("data-df-line=");
+  });
+
   it("shows a placeholder for a screen without html", () => {
     expect(screenDocument(flow, flow.screens[2], { channel: "x" })).toContain("data-empty");
   });

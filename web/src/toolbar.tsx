@@ -8,8 +8,10 @@ import {
   DialogFooter,
   IconButton,
   Menu,
+  MenuCheckboxItem,
   MenuItem,
   MenuPopup,
+  MenuSeparator,
   MenuTrigger,
   Panel,
   Toggle,
@@ -34,6 +36,9 @@ export function Toolbar({
   onActualSize,
   onRelayout,
   onApprove,
+  newReplies,
+  minimap,
+  setMinimap,
 }: {
   state: FeatureState;
   commenting: boolean;
@@ -43,6 +48,10 @@ export function Toolbar({
   onActualSize: () => void;
   onRelayout: () => void;
   onApprove: () => Promise<void>;
+  /** Threads with agent replies the user has not looked at yet. */
+  newReplies: number;
+  minimap: boolean;
+  setMinimap: (on: boolean) => void;
 }) {
   const rf = useReactFlow();
   const { zoom } = useViewport();
@@ -60,9 +69,17 @@ export function Toolbar({
       <Toggle aria-label={t.comment} title={`${t.comment} (C)`} pressed={commenting} onPressedChange={setCommenting} size="sm">
         <MessageSquarePlus size={16} />
       </Toggle>
-      <Button size="sm" variant="ghost" aria-label={t.comments} onClick={onTogglePanel}>
+      <Button size="sm" variant="ghost" aria-label={newReplies ? t.commentsWithNew(newReplies) : t.comments} onClick={onTogglePanel} className="relative">
         <MessageSquare size={15} />
         <span className="tabular-nums">{openCount}</span>
+        {newReplies > 0 && (
+          <span
+            data-new-replies
+            className="absolute -top-1 -right-1 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-foreground px-1 text-[12px] leading-none font-medium text-background tabular-nums"
+          >
+            {newReplies}
+          </span>
+        )}
       </Button>
       <span className="mx-1 h-5 w-px bg-border" />
       <IconButton label={t.zoomOut} title={`${t.zoomOut} (${MOD}−)`} size="sm" variant="ghost" onClick={() => rf.zoomOut({ duration: 150 })}>
@@ -88,6 +105,10 @@ export function Toolbar({
             <LayoutGrid size={15} />
             {t.relayout}
           </MenuItem>
+          <MenuSeparator />
+          <MenuCheckboxItem checked={minimap} onCheckedChange={setMinimap}>
+            {t.minimap}
+          </MenuCheckboxItem>
         </MenuPopup>
       </Menu>
       <IconButton label={t.zoomIn} title={`${t.zoomIn} (${MOD}+)`} size="sm" variant="ghost" onClick={() => rf.zoomIn({ duration: 150 })}>

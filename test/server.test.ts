@@ -326,6 +326,38 @@ describe("screen html", () => {
     expect(st.prototype).toContain(`<section data-screen="A">`);
   });
 
+  it("tells the canvas which prototype.html line each screen's section starts on", async () => {
+    const { base } = await boot();
+    const dir = project();
+    writeFileSync(join(dir, ".design-flow", "demo", "prototype.html"), `<html><head></head><body>\n<section data-screen="A">a</section>\n\n<section data-screen="B">b</section>\n</body></html>`);
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const st = await json(await fetch(`${base}/api/projects/${key}/features/demo`));
+    expect(st.flow.screens.map((s: { id: string; htmlLine?: number }) => [s.id, s.htmlLine])).toEqual([
+      ["A", 2],
+      ["B", 4],
+    ]);
+  });
+
+  it("keeps an element anchor's box, offset, near and line when they make sense, and drops them when not", async () => {
+    const { base } = await boot();
+    const dir = project();
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const f = `${base}/api/projects/${key}/features/demo`;
+    const anchor = { type: "element", screen: "A", selector: '[data-id="pay"]', tag: "button", text: "Pay", point: { x: 1, y: 1 } };
+    const good = { box: { x: 24, y: 700.5, width: 342, height: 52 }, offset: { x: 0.25, y: 1 }, near: "Total $42 Pay", line: 31 };
+    const ok = await json(await post(`${f}/comments`, { anchor: { ...anchor, ...good }, text: "Bigger" }));
+    expect(ok.threads[0].anchor).toEqual({ ...anchor, ...good });
+    const bad = [
+      { box: { x: 1, y: 2, width: -5, height: 3 }, offset: { x: 1.5, y: 0 }, near: "x".repeat(121), line: 0 },
+      { box: { x: "1", y: 2, width: 5, height: 3 }, offset: [0.5, 0.5], near: 7, line: 2.5 },
+      { box: null, offset: { x: Number.NaN, y: 0 }, near: "   ", line: "31" },
+    ];
+    for (const fields of bad) {
+      const r = await json(await post(`${f}/comments`, { anchor: { ...anchor, ...fields }, text: "Dropped" }));
+      expect(r.threads.at(-1).anchor).toEqual(anchor);
+    }
+  });
+
   it("lists prototype.html problems with the flow's issues", async () => {
     const { base } = await boot();
     const dir = project();

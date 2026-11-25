@@ -5,11 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { approvalStatus, markApprovalSeen, unseenApproval } from "../core/approval.ts";
-import { CommentStore, describeAnchor, messageText, optionLetter, seenCount, type Locale, type Offer, type Thread } from "../core/comments.ts";
+import { CommentStore, describeAnchor, messageText, optionLetter, seenCount, type Anchor, type Locale, type Offer, type Thread } from "../core/comments.ts";
 import { parseFlow } from "../core/flow.ts";
 import { checkPrototype, readPrototype } from "../core/prototype.ts";
 import { BUILD, DEFAULT_PORT, projectKey, VERSION } from "../server/server.ts";
 import { PROTOTYPE, TEMPLATE } from "./template.ts";
+import { UsageError } from "./usage.ts";
 
 declare const __DESIGN_FLOW_BUNDLE__: boolean | undefined;
 const FEATURE_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -24,7 +25,7 @@ interface Args {
   lists: Record<string, string[]>;
 }
 /** Flags that take a value, as `--flag value` or `--flag=value`. */
-const VALUE_FLAGS = ["text", "project-dir", "option", "recommend", "applied"];
+const VALUE_FLAGS = ["text", "project-dir", "option", "recommend", "applied", "element", "scale", "out", "dir"];
 const LIST_FLAGS = ["option"];
 function parseArgs(argv: string[]): Args {
   const out: Args = { _: [], flags: {}, lists: {} };
@@ -56,6 +57,28 @@ function optionIndex(a: Args, flag: string, count: number): number | undefined {
   return i;
 }
 
+/** The options a reply or a question offers, by the rules of checkOffer; none when there are no --option flags. */
+function offerOf(a: Args): Offer | undefined {
+  const options = a.lists.option ?? [];
+  if (options.length === 1 || options.length > 4) throw new UsageError("offer two to four options, or none");
+  const recommended = optionIndex(a, "recommend", options.length);
+  const applied = optionIndex(a, "applied", options.length);
+  if (options.length && recommended === undefined && applied === undefined)
+    throw new UsageError("with options, say which one you recommend (--recommend) or have applied (--applied)");
+  return options.length ? { options, recommended, applied } : undefined;
+}
+
+/** Where an anchor is in prototype.html, for the agent to open: " prototype.html:42", or nothing. */
+const lineNote = (a: Anchor) => (a.type === "element" && a.line ? ` prototype.html:${a.line}` : "");
+
+/** A value flag as a string, or undefined; given without a value it is a usage error. */
+function valueFlag(a: Args, k: string): string | undefined {
+  const v = a.flags[k];
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || !v) throw new UsageError(`--${k} needs a value`);
+  return v;
+}
+
 /** A thread as the agent reads it: messages marked (new) when unread, and each offer's options. */
 function printThread(t: Thread, where: string, fresh: Set<string>) {
   console.log(`#${t.id} [${t.status}] ${where}`);
@@ -67,8 +90,6 @@ function printThread(t: Thread, where: string, fresh: Set<string>) {
     });
   }
 }
-
-class UsageError extends Error {}
 
 function projectDir(a: Args) {
   return resolve(typeof a.flags["project-dir"] === "string" ? a.flags["project-dir"] : process.cwd());
@@ -176,15 +197,42 @@ function printIssues(issues: ReturnType<typeof parseFlow>["issues"], dir: string
   }
 }
 
-function check(dir: string, f: string): number {
-  const fd = requireFeature(dir, f);
+function staticIssues(fd: string) {
   const file = join(fd, "flow.yaml");
   const { flow, issues } = parseFlow(readFileSync(file, "utf8"), file);
   const proto = join(fd, "prototype.html");
   if (flow && existsSync(proto)) issues.push(...checkPrototype(readPrototype(readFileSync(proto, "utf8")), flow, proto));
+  return { valid: !!flow, issues };
+}
+
+function check(dir: string, f: string): number {
+  const { issues } = staticIssues(requireFeature(dir, f));
   if (!issues.length) {
     console.log(`${f}: clean`);
     return 0;
+  }
+  printIssues(issues, dir);
+  return 3;
+}
+
+/** check, then render every screen and add what looks broken; a flow too broken to draw is not rendered. */
+async function checkVisual(dir: string, f: string): Promise<number> {
+  const fd = requireFeature(dir, f);
+  const { valid, issues } = staticIssues(fd);
+  if (valid) {
+    const { loadFeature, visualCheck } = await import("./visual.ts");
+    const feature = loadFeature(fd, f);
+    try {
+      issues.push(...(await visualCheck(feature)));
+    } catch (e) {
+      // Without a browser, check's own issues still count.
+      printIssues(issues, dir);
+      throw e;
+    }
+    if (!issues.length) {
+      console.log(`${f}: clean, ${feature.flow.screens.length} screen${feature.flow.screens.length === 1 ? "" : "s"} rendered`);
+      return 0;
+    }
   }
   printIssues(issues, dir);
   return 3;
@@ -195,19 +243,28 @@ const HELP = `design-flow ${VERSION} — UX flow canvas for coding agents
 Usage: design-flow <command> [feature] [options]
 
   open <feature> [--no-open]       Start the server, create flow.yaml if missing, open the canvas
-  check <feature>                  Validate flow.yaml (exit 0 clean, 3 issues)
+  check <feature> [--visual]       Validate flow.yaml (exit 0 clean, 3 issues); --visual also renders
+                                   every screen and reports overflow, cut-off and overlapping text
+  shot <feature> <screen> [--element <selector>] [--scale 1|2] [--out <file>]
+  shot <feature> --all [--dir <dir>]
+                                   Render screens to PNG (in the temp dir by default) and print each path
+  outline <feature> [<screen>] [--json]
+                                   Screens, edges and threads; with a screen, its rendered element tree
   comments <feature> [--unread] [--json]
                                    Show comment threads; what it shows counts as read
   reply <feature> <thread> --text <text> [--option <text>]... [--recommend <A>] [--applied <A>]
                                    Reply as the agent; with 2 to 4 options the user picks one with a click
+  ask <feature> <screen> --text <text> [--element <selector>] [--option <text>]... [--recommend <A>] [--applied <A>]
+                                   Start a thread as the agent, on a screen or one of its elements
   resolve <feature> <thread>       Resolve a thread you have read to the end
   status <feature>                 draft | approved | stale, open and unread threads
   watch                            Print one line per new comment or approval; read them with comments
   list                             List features in this project
   stop                             Stop the server
-  hook                             Claude Code UserPromptSubmit hook
+  hook [--stop]                    Claude Code UserPromptSubmit hook; with --stop, the Stop hook
 
 Options: --project-dir <path> (default: current directory)
+Rendering uses Chrome, Chromium, Edge or Brave; set DESIGN_FLOW_CHROME to choose one.
 `;
 
 export async function main(argv: string[]): Promise<number> {
@@ -238,7 +295,23 @@ export async function main(argv: string[]): Promise<number> {
         return code === 3 ? 3 : 0;
       }
       case "check":
-        return check(dir, feature(a));
+        return a.flags.visual ? await checkVisual(dir, feature(a)) : check(dir, feature(a));
+      case "shot": {
+        const f = feature(a);
+        const { loadFeature, shot } = await import("./visual.ts");
+        const scale = valueFlag(a, "scale") ?? "2";
+        if (scale !== "1" && scale !== "2") throw new UsageError("--scale is 1 or 2");
+        const opts = { screen: a._[2], all: !!a.flags.all, element: valueFlag(a, "element"), scale: Number(scale), out: valueFlag(a, "out"), dir: valueFlag(a, "dir") };
+        for (const p of await shot(loadFeature(requireFeature(dir, f), f), opts, (m) => console.error(`design-flow: ${m}`))) console.log(p);
+        return 0;
+      }
+      case "outline": {
+        const f = feature(a);
+        const fd = requireFeature(dir, f);
+        const { loadFeature, outlineFlow, outlineScreen } = await import("./visual.ts");
+        console.log(a._[2] ? await outlineScreen(loadFeature(fd, f), a._[2], !!a.flags.json) : outlineFlow(fd, f, !!a.flags.json));
+        return 0;
+      }
       case "comments": {
         const f = feature(a);
         const fd = requireFeature(dir, f);
@@ -248,6 +321,7 @@ export async function main(argv: string[]): Promise<number> {
         const threads = store.threads.filter((t) => !a.flags.unread || t.messages.some((m) => fresh.has(m.id)));
         const loc = locale();
         const where = (t: Thread) => (flow ? describeAnchor(t.anchor, flow, loc) : "");
+        const located = (t: Thread) => where(t) + lineNote(t.anchor);
         if (a.flags.json)
           console.log(
             JSON.stringify(
@@ -258,7 +332,7 @@ export async function main(argv: string[]): Promise<number> {
           );
         else {
           if (!threads.length) console.log(a.flags.unread ? "No unread comments." : "No comments.");
-          for (const t of threads) printThread(t, where(t), fresh);
+          for (const t of threads) printThread(t, located(t), fresh);
         }
         // Printed, so read: only now, so that a run that dies first leaves them unread.
         store.markRead(threads.map((t) => t.id));
@@ -270,13 +344,7 @@ export async function main(argv: string[]): Promise<number> {
         const text = a.flags.text;
         if (!id || typeof text !== "string" || !text.trim())
           throw new UsageError("usage: design-flow reply <feature> <thread> --text <text> [--option <text>]... [--recommend <A>] [--applied <A>]");
-        const options = a.lists.option ?? [];
-        if (options.length === 1 || options.length > 4) throw new UsageError("offer two to four options, or none");
-        const recommended = optionIndex(a, "recommend", options.length);
-        const applied = optionIndex(a, "applied", options.length);
-        if (options.length && recommended === undefined && applied === undefined)
-          throw new UsageError("with options, say which one you recommend (--recommend) or have applied (--applied)");
-        const offer: Offer | undefined = options.length ? { options, recommended, applied } : undefined;
+        const offer = offerOf(a);
         const store = CommentStore.load(requireFeature(dir, f));
         store.reply(id, "agent", text.trim(), offer);
         await notify(dir, f);
@@ -288,6 +356,22 @@ export async function main(argv: string[]): Promise<number> {
           for (const d of missed) console.log(`  user: ${d.text}`);
         }
         store.markRead([id]);
+        return 0;
+      }
+      case "ask": {
+        const f = feature(a);
+        const text = a.flags.text;
+        const usage = "usage: design-flow ask <feature> <screen> --text <text> [--element <selector>] [--option <text>]... [--recommend <A>] [--applied <A>]";
+        if (typeof text !== "string" || !text.trim()) throw new UsageError(usage);
+        const offer = offerOf(a);
+        const fd = requireFeature(dir, f);
+        const { askAnchor, loadFeature, screenOf } = await import("./visual.ts");
+        const feat = loadFeature(fd, f);
+        const { anchor, count } = await askAnchor(feat, screenOf(feat.flow, a._[2], usage), valueFlag(a, "element"));
+        const t = CommentStore.load(fd).ask(anchor, text.trim(), offer);
+        await notify(dir, f);
+        console.log(`Asked #${t.id} on ${describeAnchor(anchor, feat.flow, locale())}${lineNote(anchor)}.`);
+        if (count > 1) console.log(`--element matched ${count} elements; the question is on the first.`);
         return 0;
       }
       case "resolve": {
@@ -349,8 +433,8 @@ export async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "hook": {
-        const { hook } = await import("./hook.ts");
-        return await hook(dir);
+        const { hook, stopHook } = await import("./hook.ts");
+        return a.flags.stop ? await stopHook(dir, await stdinJson()) : await hook(dir);
       }
       case undefined:
       case "help":
@@ -366,12 +450,38 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
+/** The JSON a hook gets on stdin, or {} when there is none: a terminal, nothing within `ms`, or not JSON. */
+async function stdinJson(ms = 2000): Promise<Record<string, unknown>> {
+  if (process.stdin.isTTY) return {};
+  const text = await new Promise<string>((done) => {
+    let s = "";
+    const end = () => {
+      clearTimeout(timer);
+      done(s);
+    };
+    const timer = setTimeout(end, ms);
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (d) => (s += d));
+    process.stdin.once("end", end);
+    process.stdin.once("error", end);
+  });
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 /** Ask a running server to push fresh state (file watching would catch it too; this is faster). */
 async function notify(dir: string, f: string) {
   const info = await runningServer();
   if (!info) return;
   await fetch(`http://127.0.0.1:${info.port}/api/projects/${projectKey(dir)}/features/${f}`).catch(() => {});
 }
+
+/** How long watch collects comments after the first before it prints them together. */
+const WATCH_BATCH_MS = 2000;
 
 function watchEvents(dir: string): Promise<number> {
   return new Promise((resolveExit) => {
@@ -380,6 +490,15 @@ function watchEvents(dir: string): Promise<number> {
     let waiting = false;
     let socket: WebSocket | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    // A user often leaves several comments in a row: they print as one batch, a line each.
+    let batch: string[] = [];
+    let batchTimer: ReturnType<typeof setTimeout> | undefined;
+    const flush = () => {
+      clearTimeout(batchTimer);
+      batchTimer = undefined;
+      if (batch.length) console.log(batch.join("\n"));
+      batch = [];
+    };
     const again = (ms: number) => {
       if (!stopped) retry = setTimeout(connect, ms);
     };
@@ -412,11 +531,10 @@ function watchEvents(dir: string): Promise<number> {
       socket = ws;
       ws.on("message", (data) => {
         const m = JSON.parse(String(data));
-        if (m.type === "comment")
-          console.log(
-            `[design-flow] ${m.feature} · ${m.first ? "new comment" : "reply"} #${m.thread} on ${m.where}: ${m.text} — run: design-flow comments ${m.feature}`,
-          );
-        else if (m.type === "approved")
+        if (m.type === "comment") {
+          batch.push(`[design-flow] ${m.feature} · ${m.first ? "new comment" : "reply"} #${m.thread} on ${m.where}: ${m.text} — run: design-flow comments ${m.feature}`);
+          batchTimer ??= setTimeout(flush, WATCH_BATCH_MS);
+        } else if (m.type === "approved")
           console.log(`[design-flow] ${m.feature} · APPROVED (flow.yaml ${String(m.sha256).slice(0, 8)}) — you may start coding this feature.`);
       });
       ws.on("close", () => again(1500));
@@ -425,6 +543,7 @@ function watchEvents(dir: string): Promise<number> {
     // SIGTERM or SIGINT ends the watch for good: no reconnect, and no socket or timer left to keep the process alive.
     const stop = () => {
       stopped = true;
+      flush();
       clearTimeout(retry);
       socket?.terminate();
       process.off("SIGTERM", stop);

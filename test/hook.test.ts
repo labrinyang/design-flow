@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +31,66 @@ async function hook(dir: string, home: string) {
   });
   return r.stdout;
 }
+
+/** Runs `hook --stop` with `input` on stdin: as JSON, or a string as it is. */
+function stopHook(dir: string, home: string, input: unknown): Promise<string> {
+  return new Promise((done, fail) => {
+    const child = spawn(process.execPath, [BIN, "hook", "--stop"], { cwd: dir, env: { ...process.env, DESIGN_FLOW_HOME: home, DESIGN_FLOW_LOCALE: "en" } });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.on("error", fail);
+    child.on("close", (code) => (code === 0 ? done(out) : fail(new Error(`exit ${code}`))));
+    child.stdin.end(typeof input === "string" ? input : JSON.stringify(input));
+  });
+}
+
+describe("design-flow hook --stop", () => {
+  const stopping = { session_id: "s", hook_event_name: "Stop", stop_hook_active: false, last_assistant_message: "Done." };
+
+  it("keeps the agent going while the user has unread messages, naming the count, features and command", async () => {
+    const home = mkdtempSync(join(tmpdir(), "df-hook-home-"));
+    const dir = project();
+    mkdirSync(join(dir, ".design-flow", "intro"), { recursive: true });
+    writeFileSync(join(dir, ".design-flow", "intro", "flow.yaml"), "version: 1\ntitle: Intro\nscreens: [{ id: A, title: A }]\n");
+    const pay = CommentStore.load(join(dir, ".design-flow", "pay"));
+    pay.addThread({ type: "screen", screen: "A", point: { x: 0, y: 0 } }, "Secret wording one");
+    pay.addThread({ type: "screen", screen: "A", point: { x: 0, y: 0 } }, "Secret wording two");
+    CommentStore.load(join(dir, ".design-flow", "intro")).addThread({ type: "canvas", point: { x: 0, y: 0 } }, "Secret wording three");
+    const out = JSON.parse(await stopHook(dir, home, stopping));
+    expect(Object.keys(out)).toEqual(["hookSpecificOutput"]);
+    expect(out.hookSpecificOutput.hookEventName).toBe("Stop");
+    const said = out.hookSpecificOutput.additionalContext;
+    expect(said).toContain("3 unread messages");
+    expect(said).toContain("1 on intro, 2 on pay");
+    expect(said).toContain("design-flow comments intro, then design-flow comments pay");
+    // It names no message, so nothing counts as read: the next prompt still delivers all three.
+    expect(said).not.toContain("Secret wording");
+    expect(JSON.parse(await stopHook(dir, home, stopping))).toEqual(out);
+    const prompt = JSON.parse(await hook(dir, home)).hookSpecificOutput.additionalContext;
+    for (const n of ["one", "two", "three"]) expect(prompt).toContain(`Secret wording ${n}`);
+    expect(await stopHook(dir, home, stopping)).toBe("");
+  });
+
+  it("lets the agent stop once a stop hook already sent it on, and when nothing waits", async () => {
+    const home = mkdtempSync(join(tmpdir(), "df-hook-home-"));
+    const dir = project();
+    const store = CommentStore.load(join(dir, ".design-flow", "pay"));
+    store.addThread({ type: "screen", screen: "A", point: { x: 0, y: 0 } }, "Unread");
+    expect(await stopHook(dir, home, { ...stopping, stop_hook_active: true })).toBe("");
+    store.markRead(store.threads.map((t) => t.id));
+    // A question the agent asked waits on the user, not the agent.
+    store.ask({ type: "screen", screen: "A", point: { x: 0, y: 0 } }, "Which one?", { options: ["One", "Two"], recommended: 0 });
+    expect(await stopHook(dir, home, stopping)).toBe("");
+    expect(await stopHook(mkdtempSync(join(tmpdir(), "df-empty-")), home, stopping)).toBe("");
+  });
+
+  it("works without input, as when run by hand", async () => {
+    const home = mkdtempSync(join(tmpdir(), "df-hook-home-"));
+    const dir = project();
+    CommentStore.load(join(dir, ".design-flow", "pay")).addThread({ type: "screen", screen: "A", point: { x: 0, y: 0 } }, "x");
+    expect(JSON.parse(await stopHook(dir, home, "not json")).hookSpecificOutput.additionalContext).toContain("1 unread message ");
+  });
+});
 
 describe("design-flow hook", () => {
   it("still delivers stored comments when the server is down", async () => {

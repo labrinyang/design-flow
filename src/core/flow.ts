@@ -28,6 +28,8 @@ export interface Screen {
   /** HTML file relative to the feature directory, instead of html. */
   file?: string;
   viewport?: Viewport;
+  /** The prototype.html line that html starts on, when html is the screen's section there. */
+  htmlLine?: number;
 }
 export interface Edge {
   from: string;

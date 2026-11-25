@@ -1,8 +1,9 @@
-import { Button, IconButton } from "@astrafoundry/design/ui";
+import { Button, Command, CommandItem, CommandList, IconButton, Tooltip } from "@astrafoundry/design/ui";
 import {
   Background,
   BackgroundVariant,
   getNodesBounds,
+  MiniMap,
   ReactFlow,
   ReactFlowProvider,
   useNodesInitialized,
@@ -17,25 +18,55 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { toPng } from "html-to-image";
-import { ArrowLeft, Play } from "lucide-react";
+import { ArrowLeft, Play, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Anchor, Point } from "../../src/core/comments.ts";
-import { describeAnchor } from "../../src/core/comments.ts";
 import type { Flow } from "../../src/core/flow.ts";
 import type { Layout } from "../../src/core/layout.ts";
-import { anchorFromFrame, anchorFromTarget, exportBounds } from "./anchor.ts";
-import { snapshotImageStyle, snapshotSvg, viewportOf } from "./screen-doc.ts";
+import { anchorFromFrame, anchorFromTarget, anchorTitle, exportBounds, pinOnElement } from "./anchor.ts";
+import { snapshotImageStyle, snapshotSvg, viewportOf, type Located } from "./screen-doc.ts";
 import { api, useFeature, type FeatureState } from "./api.ts";
 import { CommentPanel, NewComment } from "./comments.tsx";
 import { markOf, placeDraft } from "./draft.ts";
 import { FlowEdgeView } from "./edges.tsx";
 import { locale, t } from "./i18n.ts";
+import { formatLink, parseLink, type Link } from "./link.ts";
 import { LABEL_H, LANE_TITLE_OVERHANG, legendOf, NOTE_H, toReactFlow } from "./model.ts";
-import { frameEvents, highlightInFrame, LaneNodeView, ScreenNodeView, type FrameClick } from "./nodes.tsx";
+import { MOTION_MIN_AREA, MOTION_SETTLE_MS, shouldPlay } from "./motion.ts";
+import {
+  flashInFrame,
+  frameEvents,
+  highlightInFrame,
+  LaneNodeView,
+  locateInFrames,
+  ScreenNodeView,
+  setFrameMotion,
+  type FrameClick,
+  type FrameLocated,
+} from "./nodes.tsx";
+import { firstNew } from "./seen.ts";
+import { useUserSeen } from "./use-seen.ts";
 import { Toolbar } from "./toolbar.tsx";
 import { Play as PlayView } from "./play.tsx";
 import { ShareMenu } from "./share.tsx";
-import { actualSizeZoom, chromeScale, fitViewport, IS_MAC, MAX_ZOOM, MIN_ZOOM, pinScale, wheelZoomStep, zoomAround, type Insets } from "./zoom.ts";
+import {
+  actualSizeZoom,
+  chromeScale,
+  COMPACT_LABEL_ZOOM,
+  fitViewport,
+  focusZoom,
+  IS_MAC,
+  labelScale,
+  laneTitleScale,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  pinScale,
+  wheelZoomStep,
+  zoomAround,
+  type Insets,
+} from "./zoom.ts";
+
+const MOD = IS_MAC ? "⌘" : "Ctrl ";
 
 function NotesNode({ data }: { data: { notes: string[] } }) {
   return (
@@ -92,16 +123,34 @@ function buildNodes(g: { nodes: Node[] }, flow: Flow, layout: Layout): Node[] {
   return nodes;
 }
 
-function Pins({ state, active, onPick }: { state: FeatureState; active?: string; onPick: (id: string) => void }) {
+function Pins({
+  state,
+  points,
+  active,
+  pulse,
+  onPick,
+}: {
+  state: FeatureState;
+  /** Where pins on elements are now; the others stay at their anchor's point. */
+  points: Map<string, Point>;
+  active?: string;
+  /** The pin to pulse once; n changes on every pulse, so the same pin can pulse again. */
+  pulse?: { id: string; n: number };
+  onPick: (id: string) => void;
+}) {
   const open = state.threads.filter((x) => x.status === "open");
   return (
     <ViewportPortal>
-      {open.map((th, i) => (
+      {open.map((th, i) => {
+        const at = points.get(th.id) ?? th.anchor.point;
+        const where = anchorTitle(th.anchor, state.flow, locale);
+        return (
         <button
           key={th.id}
           type="button"
           data-pin
-          aria-label={th.where}
+          data-pulse={pulse?.id === th.id ? pulse.n % 2 : undefined}
+          aria-label={t.pinLabel(i + 1, where.detail ? `${where.title} ${where.detail}` : where.title)}
           onClick={(e) => {
             e.stopPropagation();
             onPick(th.id);
@@ -110,11 +159,12 @@ function Pins({ state, active, onPick }: { state: FeatureState; active?: string;
             "nodrag nopan absolute flex size-7 -translate-x-1/2 -translate-y-full items-center justify-center rounded-full rounded-bl-none text-[12px] font-medium tabular-nums shadow-3 transition-[scale] " +
             (active === th.id ? "scale-110 bg-primary text-primary-foreground" : "bg-substrate text-substrate-hi")
           }
-          style={{ left: th.anchor.point.x, top: th.anchor.point.y, pointerEvents: "all" }}
+          style={{ left: at.x, top: at.y, pointerEvents: "all" }}
         >
           {i + 1}
         </button>
-      ))}
+        );
+      })}
     </ViewportPortal>
   );
 }
@@ -129,6 +179,21 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   const [draft, setDraft] = useState<{ anchor: Anchor }>();
   const [playing, setPlaying] = useState(false);
   const fitted = useRef(false);
+  const [located, setLocated] = useState<Map<string, Located>>(() => new Map());
+  const [pulse, setPulse] = useState<{ id: string; n: number }>();
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [minimap, setMinimapState] = useState(() => localStorage.getItem(MINIMAP_KEY) !== "off");
+  const setMinimap = useCallback((on: boolean) => {
+    setMinimapState(on);
+    try {
+      localStorage.setItem(MINIMAP_KEY, on ? "on" : "off");
+    } catch {
+      /* storage blocked: the choice lasts for this page */
+    }
+  }, []);
+  const { seen, ready: seenReady, markSeen } = useUserSeen(project, feature, state?.threads);
+  /** The thread the URL points at, set by going to it; until the panel closes, the screen in view does not replace it. */
+  const linkThread = useRef<string>(undefined);
 
   // Labels and lane titles are measured in the page's font, so lines are routed again once it has loaded.
   const [fontsReady, setFontsReady] = useState(false);
@@ -159,11 +224,47 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       const screen = state.flow.screens.find((x) => x.id === click.screen);
       const box = state.layout.screens[click.screen];
       if (!screen || !box) return;
-      setDraft({ anchor: anchorFromFrame(click, box, viewportOf(state.flow, screen).width) });
+      setDraft({ anchor: anchorFromFrame(click, box, viewportOf(state.flow, screen).width, screen.htmlLine) });
     };
     frameEvents.addEventListener("comment", onFrame);
     return () => frameEvents.removeEventListener("comment", onFrame);
   }, [state, rf]);
+  // Frames report where commented elements are, now and whenever their page changes, so pins can follow them.
+  useEffect(() => {
+    const items = new Map<string, { id: string; selector: string }[]>();
+    for (const th of state?.threads ?? []) {
+      if (th.status !== "open" || th.anchor.type !== "element") continue;
+      items.set(th.anchor.screen, [...(items.get(th.anchor.screen) ?? []), { id: th.id, selector: th.anchor.selector }]);
+    }
+    locateInFrames(items);
+  }, [state?.threads]);
+  useEffect(() => {
+    const onLocated = (e: Event) => {
+      const { items } = (e as CustomEvent<FrameLocated>).detail;
+      setLocated((prev) => {
+        const next = new Map(prev);
+        for (const it of items) next.set(it.id, it);
+        return next;
+      });
+    };
+    frameEvents.addEventListener("located", onLocated);
+    return () => frameEvents.removeEventListener("located", onLocated);
+  }, []);
+  /** Pins of element comments sit on their element as it is now; a pin whose element is gone stays at its point. */
+  const pinPoints = useMemo(() => {
+    const out = new Map<string, Point>();
+    if (!state?.flow || !state.layout) return out;
+    for (const th of state.threads) {
+      const a = th.anchor;
+      if (th.status !== "open" || a.type !== "element") continue;
+      const at = located.get(th.id);
+      const box = state.layout.screens[a.screen];
+      const screen = state.flow.screens.find((s) => s.id === a.screen);
+      if (!at || "missing" in at || !box || !screen) continue;
+      out.set(th.id, pinOnElement(a, at, box, viewportOf(state.flow, screen).width));
+    }
+    return out;
+  }, [state, located]);
   /** Show every screen with its title and note, clear of the toolbar and an open comment panel. */
   const fitToWindow = useCallback(
     (duration = 0) => {
@@ -179,9 +280,100 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   useEffect(() => {
     if (nodesReady && nodes.length && !fitted.current) {
       fitted.current = true;
-      requestAnimationFrame(() => fitToWindow());
+      requestAnimationFrame(() => {
+        fitToWindow();
+        followLink(parseLink(location.hash));
+      });
     }
+    // followLink reads the state as it is then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodesReady, nodes.length, fitToWindow]);
+
+  /** Show one screen whole and readable, in the part of the canvas the panel and toolbar leave free. */
+  const focusScreen = useCallback(
+    (id: string, duration = 250) => {
+      const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
+      const box = state?.layout?.screens[id];
+      const screen = state?.flow?.screens.find((s) => s.id === id);
+      if (!canvas || !box || !screen || !state?.flow) return;
+      const insets = fitInsets(canvas);
+      const free = { width: canvas.width - insets.left - insets.right, height: canvas.height - insets.top - insets.bottom };
+      const zoom = focusZoom({ w: box.w, h: box.h + LABEL_H }, free, viewportOf(state.flow, screen).width / box.w);
+      // The frame with its label above it, centred.
+      const cx = box.x + box.w / 2;
+      const cy = box.y + (box.h - LABEL_H) / 2;
+      void rf.setViewport({ x: insets.left + free.width / 2 - cx * zoom, y: insets.top + free.height / 2 - cy * zoom, zoom }, { duration });
+    },
+    [rf, state],
+  );
+
+  /** Point the URL at a thread or a screen, without adding to the history. */
+  const writeLink = useCallback((link: Link) => {
+    const hash = formatLink(link);
+    if (hash === location.hash || (!hash && !location.hash)) return;
+    history.replaceState(history.state, "", hash || location.pathname + location.search);
+  }, []);
+
+  /** Go to a thread from the panel or a link: show where it is, ring its element and pulse its pin once. */
+  const jumpTo = useCallback(
+    (id: string) => {
+      const th = state?.threads.find((x) => x.id === id);
+      if (!th) return;
+      const a = th.anchor;
+      setActiveThread(id);
+      linkThread.current = id;
+      writeLink({ thread: id });
+      if (a.type === "element" || a.type === "screen") focusScreen(a.screen);
+      else {
+        const p = pinPoints.get(id) ?? a.point;
+        void rf.setCenter(p.x, p.y, { zoom: Math.max(rf.getZoom(), 0.8), duration: 250 });
+      }
+      window.setTimeout(() => {
+        if (a.type === "element") flashInFrame(a.screen, a.selector);
+        if (th.status === "open") setPulse((p) => ({ id, n: (p?.n ?? 0) + 1 }));
+      }, 280);
+    },
+    [state, rf, focusScreen, pinPoints, writeLink],
+  );
+
+  /** A link names a thread (an id or its first characters) or a screen. */
+  const followLink = useCallback(
+    (link: Link) => {
+      if (!state?.flow) return;
+      if (link.thread) {
+        const exact = state.threads.find((x) => x.id === link.thread);
+        const starts = state.threads.filter((x) => x.id.startsWith(link.thread!));
+        const th = exact ?? (link.thread.length >= 4 && starts.length === 1 ? starts[0] : undefined);
+        if (th) {
+          setPanelOpen(true);
+          // Once the panel is in, so the view leaves room for it.
+          window.setTimeout(() => jumpTo(th.id), 60);
+          return;
+        }
+      }
+      if (link.screen && state.flow.screens.some((s) => s.id === link.screen)) focusScreen(link.screen, 0);
+    },
+    [state, jumpTo, focusScreen],
+  );
+  useEffect(() => {
+    const onHash = () => followLink(parseLink(location.hash));
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [followLink]);
+
+  /** Once the view settles with no thread linked: link the screen in the middle of it, if one is big enough to read there. */
+  const onSettle = useCallback(
+    (v: { x: number; y: number; zoom: number }, view: { width: number; height: number }) => {
+      if (linkThread.current || !state?.flow || !state.layout) return;
+      const c = { x: (view.width / 2 - v.x) / v.zoom, y: (view.height / 2 - v.y) / v.zoom };
+      const hit = state.flow.screens.find((s) => {
+        const b = state.layout!.screens[s.id];
+        return b && c.x >= b.x && c.x <= b.x + b.w && c.y >= b.y - LABEL_H && c.y <= b.y + b.h && b.w * b.h * v.zoom * v.zoom >= MOTION_MIN_AREA;
+      });
+      writeLink(hit ? { screen: hit.id } : {});
+    },
+    [state, writeLink],
+  );
 
   /** Screens at their real CSS size, around the middle of the canvas. */
   const actualSize = useCallback(() => {
@@ -214,6 +406,11 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // ⌘ + / ⌘ − / ⌘ 0 (Ctrl elsewhere) zoom the canvas instead of the page, even while typing a comment.
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !playing && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !playing) {
         const zoom = e.key === "=" || e.key === "+" ? "in" : e.key === "-" || e.key === "_" ? "out" : e.key === "0" ? "fit" : undefined;
         if (zoom) {
@@ -280,7 +477,15 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     const viewport = document.querySelector<HTMLElement>(".react-flow__viewport");
     if (!viewport) return;
     const nodeBoxes = getNodesBounds(rf.getNodes());
-    const pins = withComments && state ? state.threads.filter((x) => x.status === "open").map((x) => ({ x: x.anchor.point.x - 14, y: x.anchor.point.y - 28, width: 28, height: 28 })) : [];
+    const pins =
+      withComments && state
+        ? state.threads
+            .filter((x) => x.status === "open")
+            .map((x) => {
+              const p = pinPoints.get(x.id) ?? x.anchor.point;
+              return { x: p.x - 14, y: p.y - 28, width: 28, height: 28 };
+            })
+        : [];
     const b = exportBounds([nodeBoxes, ...pins], 48);
     const bg = getComputedStyle(document.documentElement).getPropertyValue("--canvas");
     // The picture is drawn at 100%, so pins and outlines take their 100% size there whatever the zoom on screen.
@@ -307,7 +512,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     a.href = url;
     a.download = `${feature}.png`;
     a.click();
-  }, [rf, feature, state]);
+  }, [rf, feature, state, pinPoints]);
 
   if (error) return <div className="p-10 text-muted-foreground">{error}</div>;
   if (!state) return null;
@@ -326,6 +531,13 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {flow && <Legend flow={flow} />}
           {flow && (
+            <Tooltip content={`${t.searchScreens} (${MOD}K)`} side="bottom">
+              <IconButton label={t.searchScreens} size="sm" variant="ghost" onClick={() => setSearchOpen(true)}>
+                <Search size={16} />
+              </IconButton>
+            </Tooltip>
+          )}
+          {flow && (
             <>
               <span className="mx-1 h-5 w-px bg-border" />
               <Button size="sm" variant="secondary" onClick={() => setPlaying(true)}>
@@ -338,6 +550,18 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         </div>
       </header>
       {playing && flow && <PlayView flow={flow} prototype={state.prototype} start={startScreen(flow)} onClose={() => setPlaying(false)} />}
+      {flow && (
+        <ScreenSearch
+          flow={flow}
+          open={searchOpen}
+          onOpenChange={setSearchOpen}
+          onPick={(id) => {
+            linkThread.current = undefined;
+            writeLink({ screen: id });
+            focusScreen(id);
+          }}
+        />
+      )}
       {!connected && <div className="bg-accent px-4 py-1.5 text-[13px] text-accent-foreground">{t.disconnected}</div>}
       {issues.length > 0 && (
         <div role="alert" className="border-b border-border bg-card px-4 py-2 text-[13px]">
@@ -374,27 +598,50 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           >
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} />
             <ChromeScale />
+            <MotionGate flow={flow} layout={layout} paused={playing} onSettle={onSettle} />
             <Pins
               state={state}
+              points={pinPoints}
               active={activeThread}
+              pulse={pulse}
               onPick={(id) => {
                 setActiveThread(id);
                 setPanelOpen(true);
+                linkThread.current = id;
+                writeLink({ thread: id });
               }}
             />
+            {minimap && (
+              <MiniMap
+                position="bottom-left"
+                pannable
+                zoomable
+                ariaLabel={t.minimap}
+                nodeColor={miniMapColor}
+                nodeStrokeColor="transparent"
+                nodeBorderRadius={6}
+                bgColor="var(--card)"
+                maskColor="color-mix(in oklab, var(--canvas) 55%, transparent)"
+                className="overflow-hidden rounded-[14px] shadow-2 ring-1 ring-border"
+                onClick={(_, p) => void rf.setCenter(p.x, p.y, { zoom: rf.getZoom(), duration: 200 })}
+              />
+            )}
           </ReactFlow>
         )}
         {draft && flow && (
           <DraftAt point={draft.anchor.point}>
             <NewComment
               focusKey={draft.anchor}
-              where={describeAnchor(draft.anchor, flow, locale)}
+              title={anchorTitle(draft.anchor, flow, locale)}
               onCancel={() => setDraft(undefined)}
               onSubmit={(text) =>
                 api.comment(project, feature, draft.anchor, text).then((s) => {
+                  const before = new Set(state.threads.map((x) => x.id));
                   setState(s);
                   setDraft(undefined);
                   setPanelOpen(true);
+                  const added = s.threads.find((x) => !before.has(x.id));
+                  if (added) setActiveThread(added.id);
                 })
               }
             />
@@ -408,6 +655,9 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           onFit={() => fitToWindow(200)}
           onActualSize={actualSize}
           onRelayout={() => void api.clearLayout(project, feature).then(setState)}
+          newReplies={seenReady ? state.threads.filter((x) => firstNew(x.messages, seen[x.id]) !== undefined).length : 0}
+          minimap={minimap}
+          setMinimap={setMinimap}
           onApprove={() => api.approve(project, feature, state.sha256).then(setState)}
         />
         {panelOpen && (
@@ -415,12 +665,19 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
             state={state}
             onChange={setState}
             active={activeThread}
-            onFocus={(id) => {
-              setActiveThread(id);
-              const th = state.threads.find((x) => x.id === id);
-              if (th) rf.setCenter(th.anchor.point.x, th.anchor.point.y, { zoom: Math.max(rf.getZoom(), 0.8), duration: 250 });
+            numbers={new Map(state.threads.filter((x) => x.status === "open").map((x, i) => [x.id, i + 1]))}
+            seen={seen}
+            seenReady={seenReady}
+            onSeen={markSeen}
+            onHover={setActiveThread}
+            onJump={jumpTo}
+            onClose={() => {
+              setPanelOpen(false);
+              if (linkThread.current) {
+                linkThread.current = undefined;
+                writeLink({});
+              }
             }}
-            onClose={() => setPanelOpen(false)}
           />
         )}
       </main>
@@ -435,8 +692,109 @@ function ChromeScale() {
   useEffect(() => {
     root?.style.setProperty("--df-chrome", String(chromeScale(zoom)));
     root?.style.setProperty("--df-pin", String(pinScale(zoom)));
+    root?.style.setProperty("--df-label", String(labelScale(zoom)));
+    root?.style.setProperty("--df-lane", String(laneTitleScale(zoom)));
+    root?.toggleAttribute("data-compact", zoom < COMPACT_LABEL_ZOOM);
   }, [root, zoom]);
   return null;
+}
+
+/**
+ * Plays each screen's animations only while its frame is on screen and big enough to watch, deciding once
+ * the view has stood still (motion.ts); everything pauses while Play is open over the canvas.
+ */
+function MotionGate({
+  flow,
+  layout,
+  paused,
+  onSettle,
+}: {
+  flow: Flow;
+  layout: Layout;
+  paused: boolean;
+  onSettle?: (v: { x: number; y: number; zoom: number }, view: { width: number; height: number }) => void;
+}) {
+  const transform = useViewportStore((s) => s.transform);
+  const root = useOptionsStore((s) => s.domNode);
+  const playingNow = useRef(new Map<string, boolean>());
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const r = root?.getBoundingClientRect();
+      if (!r) return;
+      const v = { x: transform[0], y: transform[1], zoom: transform[2] };
+      for (const s of flow.screens) {
+        const b = layout.screens[s.id];
+        if (!b) continue;
+        const on = !paused && shouldPlay(b, v, r, playingNow.current.get(s.id) ?? true);
+        playingNow.current.set(s.id, on);
+        setFrameMotion(s.id, on);
+      }
+      onSettle?.(v, r);
+    }, MOTION_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [transform, root, flow, layout, paused, onSettle]);
+  return null;
+}
+
+const MINIMAP_KEY = "design-flow:minimap";
+
+/** Screens in the minimap as grey frames; lanes as faint bands of their tone. */
+function miniMapColor(n: Node): string {
+  if (n.type === "screen") return "color-mix(in oklab, var(--muted-foreground) 55%, transparent)";
+  if (n.type === "lane") {
+    const tone = (n.data as { lane?: { tone?: string } }).lane?.tone;
+    const c = tone === "success" || tone === "info" || tone === "danger" ? `var(--${tone})` : "var(--muted-foreground)";
+    return `color-mix(in oklab, ${c} 12%, transparent)`;
+  }
+  return "transparent";
+}
+
+interface ScreenItem {
+  id: string;
+  title: string;
+  lane?: string;
+  /** What the search matches: id, title and lane. */
+  value: string;
+}
+
+/** ⌘K: find a screen by id, name or lane, and go there. */
+function ScreenSearch({ flow, open, onOpenChange, onPick }: { flow: Flow; open: boolean; onOpenChange: (open: boolean) => void; onPick: (id: string) => void }) {
+  const items = useMemo<ScreenItem[]>(
+    () =>
+      flow.screens.map((s) => {
+        const lane = flow.lanes.find((l) => l.id === s.lane)?.title;
+        return { id: s.id, title: s.title, lane, value: [s.id, s.title, lane].filter(Boolean).join(" ") };
+      }),
+    [flow],
+  );
+  return (
+    <Command
+      open={open}
+      onOpenChange={onOpenChange}
+      label={t.searchScreens}
+      placeholder={t.searchPlaceholder}
+      empty={t.noMatch}
+      items={items}
+      itemToStringValue={(it: ScreenItem) => it.value}
+    >
+      <CommandList>
+        {(it: ScreenItem) => (
+          <CommandItem
+            key={it.id}
+            value={it}
+            shortcut={it.lane}
+            onClick={() => {
+              onOpenChange(false);
+              onPick(it.id);
+            }}
+          >
+            <span className="w-10 shrink-0 font-mono text-[12px] text-muted-foreground tabular-nums">{it.id}</span>
+            <span className="min-w-0 truncate">{it.title}</span>
+          </CommandItem>
+        )}
+      </CommandList>
+    </Command>
+  );
 }
 
 /** Every node's box in flow coordinates, with screen titles and notes and lane titles, which sit outside their nodes. */
