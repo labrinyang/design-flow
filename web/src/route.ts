@@ -166,18 +166,30 @@ function stubNode(g: Grid, solid: Rect[], own: number, p: Point, side: Side): nu
   return -1;
 }
 
+/** A binary min-heap of search states `s` by cost `f`. */
 class Heap {
-  private f: number[] = [];
-  private s: number[] = [];
-  get size() {
-    return this.f.length;
+  private f = new Float64Array(1024);
+  private s = new Int32Array(1024);
+  size = 0;
+  /** The lowest f, the one pop() takes next. */
+  get top() {
+    return this.f[0];
+  }
+  clear() {
+    this.size = 0;
   }
   push(f: number, s: number) {
+    if (this.size === this.f.length) {
+      const f2 = new Float64Array(this.size * 2);
+      const s2 = new Int32Array(this.size * 2);
+      f2.set(this.f);
+      s2.set(this.s);
+      this.f = f2;
+      this.s = s2;
+    }
     const a = this.f;
     const b = this.s;
-    let i = a.length;
-    a.push(f);
-    b.push(s);
+    let i = this.size++;
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (a[p] <= f) break;
@@ -188,13 +200,14 @@ class Heap {
     a[i] = f;
     b[i] = s;
   }
-  pop(): [number, number] {
+  /** Removes the entry with the lowest f and returns its state. */
+  pop(): number {
     const a = this.f;
     const b = this.s;
-    const top: [number, number] = [a[0], b[0]];
-    const f = a.pop()!;
-    const s = b.pop()!;
-    const n = a.length;
+    const top = b[0];
+    const n = --this.size;
+    const f = a[n];
+    const s = b[n];
     if (n) {
       let i = 0;
       for (;;) {
@@ -214,25 +227,57 @@ class Heap {
 }
 
 /**
+ * What search() works in on one grid, kept from call to call: a search state's `dist` and `prev` count only
+ * while `seen` holds the current call's stamp, so nothing needs clearing between calls.
+ */
+interface Scratch {
+  dist: Float64Array;
+  prev: Int32Array;
+  seen: Uint32Array;
+  stamp: number;
+  heap: Heap;
+  /** How many lines already use each grid step: point k * 2 for the step east, k * 2 + 1 for the step south. */
+  used: Uint32Array;
+}
+
+function scratchFor(g: Grid): Scratch {
+  const states = g.xs.length * g.ny * 4 + 1;
+  return {
+    dist: new Float64Array(states),
+    prev: new Int32Array(states),
+    seen: new Uint32Array(states),
+    stamp: 0,
+    heap: new Heap(),
+    used: new Uint32Array(g.xs.length * g.ny * 2),
+  };
+}
+
+/**
  * Cheapest grid path from point `from` (leaving in direction `fromDir`) to point `to`, which must be
  * left in direction `toDir` for the last `toLen` pixels to the line end. Directions: 0 +x, 1 −x, 2 +y, 3 −y.
  */
-function search(g: Grid, from: number, fromDir: number, to: number, toDir: number, toLen: number, used: Map<number, number>, back: boolean) {
+function search(g: Grid, scratch: Scratch, from: number, fromDir: number, to: number, toDir: number, toLen: number, back: boolean) {
   const { xs, ys, ny, east, south } = g;
+  const { dist, prev, seen, heap, used } = scratch;
   const rowCost = g.rowCost[back ? 1 : 0];
-  const n = xs.length * ny;
-  const END = n * 4;
-  const dist = new Float64Array(END + 1).fill(Infinity);
-  const prev = new Int32Array(END + 1).fill(-1);
+  const END = xs.length * ny * 4;
+  const stamp = ++scratch.stamp;
+  const distOf = (s: number) => (seen[s] === stamp ? dist[s] : Infinity);
+  const reach = (s: number, d: number, via: number) => {
+    dist[s] = d;
+    prev[s] = via;
+    seen[s] = stamp;
+  };
   const tx = xs[Math.floor(to / ny)];
   const ty = ys[to % ny];
   const h = (k: number) => Math.abs(xs[Math.floor(k / ny)] - tx) + Math.abs(ys[k % ny] - ty) + toLen;
-  const heap = new Heap();
+  heap.clear();
   const s0 = from * 4 + fromDir;
-  dist[s0] = 0;
+  reach(s0, 0, -1);
   heap.push(h(from), s0);
   while (heap.size) {
-    const [f, s] = heap.pop();
+    const f = heap.top;
+    const s = heap.pop();
     if (s === END) break;
     const k = s >> 2;
     const dir = s & 3;
@@ -240,9 +285,8 @@ function search(g: Grid, from: number, fromDir: number, to: number, toDir: numbe
     if (d0 + h(k) < f - 1e-6) continue;
     if (k === to && dir !== OPP[toDir]) {
       const c = d0 + toLen + (dir === toDir ? 0 : BEND);
-      if (c < dist[END]) {
-        dist[END] = c;
-        prev[END] = s;
+      if (c < distOf(END)) {
+        reach(END, c, s);
         heap.push(c, END);
       }
     }
@@ -255,31 +299,48 @@ function search(g: Grid, from: number, fromDir: number, to: number, toDir: numbe
       let key = 0;
       let link = 0;
       if (d === 0) {
-        if (east[k]) [nb, len, key, link] = [k + ny, xs[i + 1] - xs[i], k * 2, east[k]];
+        if (east[k]) {
+          nb = k + ny;
+          len = xs[i + 1] - xs[i];
+          key = k * 2;
+          link = east[k];
+        }
       } else if (d === 1) {
-        if (i > 0 && east[k - ny]) [nb, len, key, link] = [k - ny, xs[i] - xs[i - 1], (k - ny) * 2, east[k - ny]];
+        if (i > 0 && east[k - ny]) {
+          nb = k - ny;
+          len = xs[i] - xs[i - 1];
+          key = (k - ny) * 2;
+          link = east[k - ny];
+        }
       } else if (d === 2) {
-        if (south[k]) [nb, len, key, link] = [k + 1, ys[j + 1] - ys[j], k * 2 + 1, south[k]];
-      } else if (j > 0 && south[k - 1]) [nb, len, key, link] = [k - 1, ys[j] - ys[j - 1], (k - 1) * 2 + 1, south[k - 1]];
+        if (south[k]) {
+          nb = k + 1;
+          len = ys[j + 1] - ys[j];
+          key = k * 2 + 1;
+          link = south[k];
+        }
+      } else if (j > 0 && south[k - 1]) {
+        nb = k - 1;
+        len = ys[j] - ys[j - 1];
+        key = (k - 1) * 2 + 1;
+        link = south[k - 1];
+      }
       if (nb < 0) continue;
-      const c =
-        d0 + len * (d < 2 ? rowCost[j] : 1) * (1 + USED * (used.get(key) ?? 0)) + (d === dir ? 0 : BEND) + (link === 2 ? SOFT : 0);
+      const c = d0 + len * (d < 2 ? rowCost[j] : 1) * (1 + USED * used[key]) + (d === dir ? 0 : BEND) + (link === 2 ? SOFT : 0);
       const ns = nb * 4 + d;
-      if (c < dist[ns] - 1e-9) {
-        dist[ns] = c;
-        prev[ns] = s;
+      if (c < distOf(ns) - 1e-9) {
+        reach(ns, c, s);
         heap.push(c + h(nb), ns);
       }
     }
   }
-  if (prev[END] < 0) return undefined;
+  if (seen[END] !== stamp) return undefined;
   const path: number[] = [];
   for (let s = prev[END]; s >= 0; s = prev[s]) path.push(s >> 2);
   path.reverse();
   for (let i = 0; i + 1 < path.length; i++) {
     const a = Math.min(path[i], path[i + 1]);
-    const key = Math.abs(path[i] - path[i + 1]) === ny ? a * 2 : a * 2 + 1;
-    used.set(key, (used.get(key) ?? 0) + 1);
+    used[Math.abs(path[i] - path[i + 1]) === ny ? a * 2 : a * 2 + 1]++;
   }
   return path;
 }
@@ -542,18 +603,24 @@ function crosses(p: Point, q: Point, box: Rect): boolean {
   return p.y > box.y0 && p.y < box.y1 && Math.max(p.x, q.x) > box.x0 && Math.min(p.x, q.x) < box.x1;
 }
 
+/** Do the two boxes share some area? */
+const touches = (a: Rect, b: Rect) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
 /**
  * Puts each label on its own line: on a horizontal stretch where it fits, else a vertical one,
  * away from frames, titles, notes and the labels placed before it, crossing as few other lines as it can.
  */
 function placeLabels(routes: (Point[] | undefined)[], sizes: ({ w: number; h: number } | undefined)[], blocks: Rect[]): (Point | undefined)[] {
   const out: (Point | undefined)[] = routes.map(() => undefined);
+  /** The labels placed so far, with the room kept round each. */
   const placed: Rect[] = [];
   const keepOff = blocks.map((b) => inflate(b, 2));
+  const lengths = routes.map((r) => (r ? lengthOf(r) : 0));
   const order = routes
     .map((_, k) => k)
     .filter((k) => routes[k] && sizes[k])
-    .sort((a, b) => lengthOf(routes[a]!) - lengthOf(routes[b]!));
+    .sort((a, b) => lengths[a] - lengths[b]);
+  const segments = routes.flatMap((r, n) => (r ? r.slice(1).map((q, m) => ({ n, p: r[m], q })) : []));
   for (const k of order) {
     const pts = routes[k]!;
     const { w, h } = sizes[k]!;
@@ -576,29 +643,50 @@ function placeLabels(routes: (Point[] | undefined)[], sizes: ({ w: number; h: nu
       // The middle of the stretch if the label fits there, else as close to it as it fits; then steps either way.
       const start = short ? centre : Math.min(to, Math.max(from, centre));
       const spots = [start];
-      if (!short) for (let d = 12; start - d >= from || start + d <= to; d += 12) spots.push(...[start - d, start + d].filter((s) => s >= from && s <= to));
-      for (const s of spots) {
-        const at = vertical ? { x: p.x, y: s } : { x: s, y: p.y };
-        const box = { x0: at.x - w / 2, y0: at.y - h / 2, x1: at.x + w / 2, y1: at.y + h / 2 };
-        let score = (vertical ? 30 : 0) + (short ? 80 : 0) + Math.abs(s - centre) * 0.1 - Math.min(b - a, 400) * 0.03;
-        for (const o of keepOff) {
+      if (!short)
+        for (let d = 12; start - d >= from || start + d <= to; d += 12)
+          for (const s of [start - d, start + d]) if (s >= from && s <= to) spots.push(s);
+      // Overlaps and crossings only add to a spot's score, so a spot whose score starts no lower than the best
+      // so far cannot beat it.
+      const bases = spots.map((s) => (vertical ? 30 : 0) + (short ? 80 : 0) + Math.abs(s - centre) * 0.1 - Math.min(b - a, 400) * 0.03);
+      const toBeat = best?.score;
+      if (toBeat !== undefined && bases.every((v) => v >= toBeat)) continue;
+      // Only what reaches into the strip the label slides along (every spot's box lies in it) can add to a spot's
+      // score. Filtering keeps the lists in order, so each score adds up the same terms in the same order as before.
+      const lo = spots.reduce((m, s) => Math.min(m, s), Infinity);
+      const hi = spots.reduce((m, s) => Math.max(m, s), -Infinity);
+      const strip = vertical
+        ? { x0: p.x - w / 2, y0: lo - h / 2, x1: p.x + w / 2, y1: hi + h / 2 }
+        : { x0: lo - w / 2, y0: p.y - h / 2, x1: hi + w / 2, y1: p.y + h / 2 };
+      const offs = keepOff.filter((o) => touches(o, strip));
+      const near = placed.filter((o) => touches(o, strip));
+      const lines = segments.filter((l) => l.n !== k && crosses(l.p, l.q, strip));
+      const box = { x0: 0, y0: 0, x1: 0, y1: 0 };
+      for (let m = 0; m < spots.length; m++) {
+        let score = bases[m];
+        if (best && score >= best.score) continue;
+        const s = spots[m];
+        const x = vertical ? p.x : s;
+        const y = vertical ? s : p.y;
+        box.x0 = x - w / 2;
+        box.y0 = y - h / 2;
+        box.x1 = x + w / 2;
+        box.y1 = y + h / 2;
+        for (const o of offs) {
           const v = overlap(box, o);
           if (v > 0) score += 1000 + v;
         }
-        for (const o of placed) {
-          const v = overlap(box, inflate(o, 3));
+        for (const o of near) {
+          const v = overlap(box, o);
           if (v > 0) score += 1000 + v;
         }
-        routes.forEach((r, n) => {
-          if (n === k || !r) return;
-          for (let m = 0; m + 1 < r.length; m++) if (crosses(r[m], r[m + 1], box)) score += 20;
-        });
-        if (!best || score < best.score) best = { score, p: at, box };
+        for (const l of lines) if (crosses(l.p, l.q, box)) score += 20;
+        if (!best || score < best.score) best = { score, p: { x, y }, box: { ...box } };
       }
     }
     if (best) {
       out[k] = best.p;
-      placed.push(best.box);
+      placed.push(inflate(best.box, 3));
     }
   }
   return out;
@@ -639,7 +727,7 @@ export function routeEdges(input: RouteInput): (Routed | undefined)[] {
   const run = (ports: (Ports | undefined)[]) => {
     const ys = [...new Set([...ys0, ...ports.flatMap((p) => (p ? [half(p.sy), half(p.ty)] : []))])].sort((a, b) => a - b);
     const g = buildGrid(solid, soft, xs, ys, zones);
-    const used = new Map<number, number>();
+    const scratch = scratchFor(g);
     const routes: (Point[] | undefined)[] = jobs.map(() => undefined);
     const end = (j: Job, source: boolean, p: Ports): Point => {
       const f = screens[source ? j.a : j.b].frame;
@@ -674,7 +762,7 @@ export function routeEdges(input: RouteInput): (Routed | undefined)[] {
       const s = stubNode(g, solid, j.a, P, j.sides[0]);
       const t = stubNode(g, solid, j.b, Q, j.sides[1]);
       if (s < 0 || t < 0) continue;
-      const path = search(g, s, j.sides[0] === "right" ? 0 : 1, t, j.sides[1] === "left" ? 0 : 1, Math.abs(g.xs[Math.floor(t / g.ny)] - Q.x), used, j.back);
+      const path = search(g, scratch, s, j.sides[0] === "right" ? 0 : 1, t, j.sides[1] === "left" ? 0 : 1, Math.abs(g.xs[Math.floor(t / g.ny)] - Q.x), j.back);
       if (path) routes[n] = simplify([P, ...path.map((k) => ({ x: g.xs[Math.floor(k / g.ny)], y: g.ys[k % g.ny] })), Q]);
     }
     return routes;

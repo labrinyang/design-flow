@@ -58,6 +58,19 @@ describe("readPrototype", () => {
       ["B", `<section data-screen="B">y</section>`],
     ]);
   });
+
+  it("numbers lines in a long prototype without rereading it per section", () => {
+    const sections = Array.from({ length: 400 }, (_, i) => `<section data-screen="S${i}">\n${"<p>row</p>\n".repeat(50)}<a data-to="S${i + 1}">next</a>\n</section>`);
+    const source = `<html><head></head><body>\n${sections.join("\n")}\n</body></html>`;
+    const t0 = performance.now();
+    const p = readPrototype(source);
+    const ms = performance.now() - t0;
+    expect(p.screens).toHaveLength(400);
+    // Each section takes 52 lines plus the line between sections; the first starts on line 2.
+    expect(p.screens.slice(0, 3).map((s) => s.line)).toEqual([2, 55, 108]);
+    expect(p.jumps[1]).toEqual({ from: "S1", to: "S2", line: 55 + 51 });
+    expect(ms).toBeLessThan(1000);
+  });
 });
 
 const flow = parseFlow(

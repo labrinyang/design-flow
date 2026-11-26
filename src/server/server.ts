@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimes, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -10,7 +10,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { approvalStatus, approve, hashFlow, hashSpec, unseenApproval } from "../core/approval.ts";
 import { CommentStore, describeAnchor, isOrphan, seenCount, type Anchor, type ElementAnchor, type Locale } from "../core/comments.ts";
 import { parseFlow, type Flow, type Issue } from "../core/flow.ts";
-import { layoutFlow, type Overrides } from "../core/layout.ts";
+import { layoutFlow } from "../core/layout.ts";
+import { PICTURE_PATH, Pictures, type PictureSource } from "./thumbs.ts";
 import { applyPrototype, checkPrototype, readPrototype } from "../core/prototype.ts";
 import { shareDocument } from "../core/share.ts";
 
@@ -37,6 +38,9 @@ export interface ServerOptions {
   locale?: Locale;
   /** The gh CLI used to publish share links; "gh" on PATH by default. */
   gh?: string;
+  /** Draws pictures of screens for the canvas (see thumbs.ts); without one the canvas shows live frames only. */
+  pictures?: PictureSource;
+  log?: (message: string) => void;
 }
 
 interface Project {
@@ -180,6 +184,38 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
   const eventSockets = new Map<string, Set<WebSocket>>(); // key
   const debounce = new Map<string, NodeJS.Timeout>();
 
+  /** Pictures drawn since the last send, by `key/feature`, then screen; sent to that feature's canvases in batches. */
+  const drawn = new Map<string, Record<string, string>>();
+  let drawnTimer: NodeJS.Timeout | undefined;
+  const sendDrawn = () => {
+    drawnTimer = undefined;
+    for (const [k, thumbs] of drawn) for (const ws of featureSockets.get(k) ?? []) send(ws, { type: "thumbs", thumbs });
+    drawn.clear();
+  };
+  const pictures = opts.pictures
+    ? new Pictures(
+        join(home, "thumbs"),
+        opts.pictures,
+        (_key, url, tokens) => {
+          for (const token of tokens) {
+            const cut = token.lastIndexOf("/");
+            const k = token.slice(0, cut);
+            drawn.set(k, { ...drawn.get(k), [token.slice(cut + 1)]: url });
+          }
+          drawnTimer ??= setTimeout(sendDrawn, 250);
+        },
+        (e) => {
+          opts.log?.(`picture: ${e.message.split("\n")[0]}`);
+          // No browser to draw with: canvases show every screen as a live page instead. Told a moment later, after
+          // the state being sent now, which may still say pictures are coming.
+          if ((e as Error & { launch?: boolean }).launch)
+            setTimeout(() => {
+              for (const set of featureSockets.values()) for (const ws of set) send(ws, { type: "pictures", on: false });
+            }, 250).unref();
+        },
+      )
+    : undefined;
+
   const persist = () =>
     writeFileSync(join(home, "projects.json"), JSON.stringify([...projects.values()].map((p) => p.dir), null, 2));
 
@@ -220,8 +256,7 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       if (parsed.flow) issues.push(...checkPrototype(proto, parsed.flow, protoFile));
       flow = applyPrototype(flow, proto);
     }
-    const overrides = readJson<Overrides>(join(dir, "layout.json"), {});
-    const layout = flow ? await layoutFlow(flow, overrides) : undefined;
+    const layout = flow ? await layoutFlow(flow) : undefined;
     const threads = CommentStore.load(dir).threads.map((t) => ({
       ...t,
       seen: seenCount(t),
@@ -233,13 +268,21 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       feature: f,
       flow,
       layout,
+      /** Pictures of the screens drawn so far, by screen id; the rest arrive in "thumbs" messages as they are drawn. */
+      thumbs: pictures && flow && layout ? pictures.forFlow(flow, layout, `${p.key}/${f}`) : {},
+      /** Whether pictures are drawn at all; without them the canvas shows every screen live. */
+      pictures: !!pictures?.available,
       issues,
-      /** The whole interactive document, for Play. */
-      prototype,
       sha256: hashFlow(text, prototype),
       threads,
       status: approvalStatus(dir),
     };
+  }
+
+  /** prototype.html as written, when the feature has one: the whole interactive document, for Play and sharing. */
+  function prototypeOf(p: Project, f: string): string | undefined {
+    const file = join(checkFeature(p, f), "prototype.html");
+    return existsSync(file) ? readFileSync(file, "utf8") : undefined;
   }
 
   async function shareHtml(p: Project, f: string): Promise<string> {
@@ -247,7 +290,7 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     if (!s.flow) throw new HttpError(409, "flow.yaml has no valid version to share yet");
     const ids = new Set(s.flow.edges.map((e) => e.to));
     const start = (s.flow.screens.find((x) => !x.lane && !ids.has(x.id)) ?? s.flow.screens.find((x) => !ids.has(x.id)) ?? s.flow.screens[0]).id;
-    return shareDocument(s.flow, s.prototype, { start });
+    return shareDocument(s.flow, prototypeOf(p, f), { start });
   }
 
   /** Publish the share page as a secret gist with the user's own gh login; returns the gist and a link that renders it. */
@@ -325,6 +368,8 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       setTimeout(() => {
         debounce.delete(k);
         void pushState(p, f);
+        // With no canvas open, still queue pictures of what changed, so they are ready when one opens.
+        if (pictures && !featureSockets.get(k)?.size) void state(p, f).catch(() => {});
         deliver(p);
       }, 80),
     );
@@ -395,22 +440,15 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     const dir = checkFeature(p, f);
     const action = parts[4];
     if (!action && m === "GET") return reply(200, await state(p, f));
+    // Play asks for the whole document when it opens, so the state the canvas gets on every change stays small.
+    if (action === "prototype" && m === "GET") return reply(200, { prototype: prototypeOf(p, f) ?? null });
     if (action === "share.html" && m === "GET") {
       res.writeHead(200, { "content-type": MIME[".html"], "content-disposition": `attachment; filename="${f}.html"` });
       res.end(await shareHtml(p, f));
       return;
     }
     if (action === "share" && m === "POST") return reply(200, await publishGist(f, await shareHtml(p, f)));
-    if (action === "layout" && m === "POST") {
-      const moved = (await body(req)) as Record<string, { x: unknown; y: unknown }>;
-      const clean: Overrides = {};
-      for (const [id, pos] of Object.entries(moved ?? {}))
-        if (typeof pos?.x === "number" && typeof pos?.y === "number" && isFinite(pos.x) && isFinite(pos.y)) clean[id] = { x: pos.x, y: pos.y };
-      const cur = readJson<Overrides>(join(dir, "layout.json"), {});
-      writeFileSync(join(dir, "layout.json"), JSON.stringify({ ...cur, ...clean }, null, 2));
-    } else if (action === "layout" && m === "DELETE") {
-      writeFileSync(join(dir, "layout.json"), "{}\n");
-    } else if (action === "approve" && m === "POST") {
+    if (action === "approve" && m === "POST") {
       const b = (await body(req)) as { sha256?: string };
       const text = readFileSync(join(dir, "flow.yaml"), "utf8");
       if (!b.sha256 || b.sha256 !== hashSpec(dir))
@@ -499,6 +537,18 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
       });
       return;
     }
+    const picture = PICTURE_PATH.exec(path);
+    if (picture) {
+      const file = pictures?.file(picture[1]);
+      if (!file || !existsSync(file)) return fail(res, 404, "no such picture");
+      // Named by what they show, so a picture never changes.
+      res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "public, max-age=31536000, immutable" });
+      res.end(readFileSync(file));
+      const now = new Date();
+      // Kept while in use: unused ones are deleted after a month (thumbs.ts).
+      utimes(file, now, now, () => {});
+      return;
+    }
     if (path === "/health") {
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, app: "design-flow", version: VERSION, build: BUILD }));
       return;
@@ -558,6 +608,8 @@ export async function startServer(opts: ServerOptions): Promise<Server> {
     async close() {
       for (const p of projects.values()) p.watcher?.close();
       for (const t of debounce.values()) clearTimeout(t);
+      clearTimeout(drawnTimer);
+      await pictures?.close();
       for (const ws of wss.clients) ws.terminate();
       wss.close();
       await new Promise<void>((r) => http.close(() => r()));

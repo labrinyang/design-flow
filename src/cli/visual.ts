@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { isMap, isSeq, LineCounter, parseDocument } from "yaml";
 import { CommentStore, unreadIn, type Anchor, type Point, type Thread } from "../core/comments.ts";
 import { parseFlow, type Flow, type Issue, type Screen } from "../core/flow.ts";
-import { layoutFlow, type Overrides } from "../core/layout.ts";
+import { layoutFlow } from "../core/layout.ts";
 import { applyPrototype, readPrototype } from "../core/prototype.ts";
 import { selectorFor } from "../core/selector.ts";
 import { cleanAnchor, inlineScreens } from "../server/server.ts";
@@ -436,14 +436,6 @@ function visualIssue(f: Feature, s: Screen, v: VisualIssue): Issue {
   }
 }
 
-const readJson = <T>(file: string, fallback: T): T => {
-  try {
-    return JSON.parse(readFileSync(file, "utf8")) as T;
-  } catch {
-    return fallback;
-  }
-};
-
 /**
  * Where a point in screen `s`'s own CSS px is on the canvas: the same scaling the canvas uses for a click in a
  * frame (anchorFromFrame in web/src/anchor.ts), from the layout the server sends it. A point below the fold or past
@@ -453,7 +445,7 @@ async function canvasPoint(f: Feature, s: Screen, p: Point): Promise<Point> {
   const vp = viewportOf(f.flow, s);
   const x = Math.min(Math.max(p.x, 0), vp.width);
   const y = Math.min(Math.max(p.y, 0), vp.height);
-  const box = (await layoutFlow(f.flow, readJson<Overrides>(join(f.dir, "layout.json"), {}))).screens[s.id];
+  const box = (await layoutFlow(f.flow)).screens[s.id];
   if (!box) return { x: Math.round(x), y: Math.round(y) };
   const k = box.w / vp.width;
   return { x: Math.round(box.x + x * k), y: Math.round(box.y + y * k) };

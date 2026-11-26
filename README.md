@@ -88,9 +88,13 @@ The agent picks a feature name, runs `design-flow open sign-up`, and writes `.de
 - **Arrows** are labelled with the action or trigger. Red arrows are errors; dashed arrows go back. Arrows go around screens, never behind them: one that skips screens runs above them, and one that goes back runs below.
 - **Badges** mark screens that return home, animate or count down; the **legend** and **notes** sit above and below.
 
-Scroll to pan; ⌘-scroll, Ctrl-scroll or pinch to zoom, up to 800%, wherever the pointer is. ⌘+ and ⌘− zoom too (Ctrl on Windows and Linux), ⌘0 fits the whole flow in the window, and **Actual size** in the zoom menu shows screens at their real size. While you comment, scrolling over a screen that is longer than its frame scrolls that screen first, then the canvas. Drag a frame to move it; Design Flow remembers it, and **Re-layout** puts everything back.
+Scroll to pan; ⌘-scroll, Ctrl-scroll or pinch to zoom, wherever the pointer is, from up to 800% out until the whole flow fits in the window, however big it is. ⌘+ and ⌘− zoom too (Ctrl on Windows and Linux), ⌘0 fits the whole flow in the window, and **Actual size** in the zoom menu shows screens at their real size. While you comment, scrolling over a screen that is longer than its frame scrolls that screen first, then the canvas. Screens stay where the layout puts them, so scrolling and dragging anywhere moves the canvas.
 
-Press ⌘K (Ctrl K) to find a screen by its id, name or lane and go straight to it. The minimap in the corner shows where you are in the flow; click or drag in it to move, or turn it off in the zoom menu. Zoomed out, screen ids and lane titles keep a readable size. The address bar follows you: it links the screen in the middle of the window (`#screen=S02`) or the comment you opened (`#thread=4a95ec3d`), so a copied link opens the canvas right there.
+Far out, screens show as pictures, which the server draws in the background whenever a screen changes and keeps until it changes again. Close enough to read, at least about 160 × 100 px on screen, a screen becomes its live page, up to 16 at a time; while you comment, the screen under the pointer goes live too, so a click lands on an element in it. A flow with hundreds of screens opens in under a second and stays light however far you zoom.
+
+Click a lane's title to collapse it to one row that says how many screens it holds and how many open comments; the lanes below move up, and arrows into and out of the lane end on that row, with ×3 on one that stands for three. Click the row to open the lane again. **Collapse all lanes** and **Expand all lanes** are in the zoom menu, and the button after a lane's title collapses every other lane and shows that one. Your browser remembers which lanes you collapsed on each canvas, and a lane opens by itself when search, a link or a comment takes you inside it.
+
+Press ⌘K (Ctrl K) to find a screen by its id, name or lane and go straight to it. The minimap in the corner shows where you are in the flow; click or drag in it to move, or turn it off in the zoom menu. Zoomed out, screen ids and lane titles keep a readable size: lane titles until they would reach the next lane's, screen ids and titles until frames get too small to read, when they hide, as arrow labels do. The address bar follows you: it links the screen in the middle of the window (`#screen=S02`) or the comment you opened (`#thread=4a95ec3d`), so a copied link opens the canvas right there.
 
 Screens play their animations only while they are on screen and at least about 160 × 100 px there; smaller or hidden ones pause until you zoom in, so a large flow sits idle instead of keeping the CPU busy.
 
@@ -211,8 +215,8 @@ The full reference the agent follows is [`skills/design-flow/SKILL.md`](skills/d
 
 ## How it works
 
-- One local server for the machine (port 27420, state in `~/.design-flow/`) serves every project; the CLI starts it on demand.
-- `flow.yaml` belongs to the agent. `layout.json` (dragged frames), `comments.json`, `approval.json` and `.last-valid.yaml` belong to the tool, next to it. While `flow.yaml` is broken the canvas keeps showing the last valid version and lists the problems.
+- One local server for the machine (port 27420, state in `~/.design-flow/`) serves every project; the CLI starts it on demand. It draws the pictures of screens with the same headless Chrome as `shot`, keeps them in `~/.design-flow/thumbs/` and deletes those not shown for a month. Without Chrome, the canvas shows every screen as a live page, as before.
+- `flow.yaml` belongs to the agent. `comments.json`, `approval.json` and `.last-valid.yaml` belong to the tool, next to it. A `layout.json` from an older version, which kept dragged frames, is no longer read. While `flow.yaml` is broken the canvas keeps showing the last valid version and lists the problems.
 - Screens run in sandboxed iframes with a content security policy that blocks network access; they can't reach your machine or the server.
 - The server only answers requests from its own origin, so other websites cannot post comments into your agent's session or approve a flow.
 

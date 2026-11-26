@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Anchor, Thread } from "../../src/core/comments.ts";
 import type { Flow, Issue } from "../../src/core/flow.ts";
-import type { Layout, Overrides } from "../../src/core/layout.ts";
+import type { Layout } from "../../src/core/layout.ts";
 
 export interface ViewThread extends Thread {
   where: string;
@@ -14,9 +14,11 @@ export interface FeatureState {
   feature: string;
   flow?: Flow;
   layout?: Layout;
+  /** Pictures of screens drawn so far, by screen id (URLs on this server); more arrive as they are drawn. */
+  thumbs: Record<string, string>;
+  /** Whether the server draws pictures at all (it needs Chrome); without them every screen is a live page. */
+  pictures: boolean;
   issues: Issue[];
-  /** prototype.html as written, when the feature has one. */
-  prototype?: string;
   sha256: string;
   threads: ViewThread[];
   status: { status: "draft" | "approved" | "stale"; openThreads: number; approvedAt?: string };
@@ -38,25 +40,36 @@ export const api = {
   projects: () => call<ProjectSummary[]>("/api/projects"),
   feature: (p: string, f: string) => `/api/projects/${p}/features/${f}`,
   post: <T = FeatureState>(path: string, body: unknown = {}) => call<T>(path, { method: "POST", body: JSON.stringify(body) }),
-  del: <T = FeatureState>(path: string) => call<T>(path, { method: "DELETE" }),
   comment: (p: string, f: string, anchor: Anchor, text: string) => api.post(`${api.feature(p, f)}/comments`, { anchor, text }),
   thread: (p: string, f: string, id: string, op: "reply" | "pick" | "resolve" | "reopen", body: unknown = {}) =>
     api.post(`${api.feature(p, f)}/threads/${id}/${op}`, body),
-  saveLayout: (p: string, f: string, o: Overrides) => api.post(`${api.feature(p, f)}/layout`, o),
-  clearLayout: (p: string, f: string) => api.del(`${api.feature(p, f)}/layout`),
+  /** prototype.html as written, for Play; null when the feature has none. */
+  prototype: (p: string, f: string) => call<{ prototype: string | null }>(`${api.feature(p, f)}/prototype`),
   share: (p: string, f: string) => api.post<{ gist: string; url: string }>(`${api.feature(p, f)}/share`),
   approve: (p: string, f: string, sha256: string) => api.post(`${api.feature(p, f)}/approve`, { sha256 }),
 };
 
 /** Live feature state over WebSocket, with reconnect. */
 export function useFeature(project: string, feature: string) {
-  const [state, setState] = useState<FeatureState>();
+  const [state, setStateOnly] = useState<FeatureState>();
+  /**
+   * Pictures of screens by screen id, as they are drawn. A screen keeps its last picture while the one of its new
+   * version is being drawn, so it never goes blank on an edit.
+   */
+  const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  const [pictures, setPictures] = useState(true);
+  const setState = useCallback((s: FeatureState) => {
+    setStateOnly(s);
+    setThumbs((had) => ({ ...had, ...s.thumbs }));
+    setPictures(s.pictures !== false);
+  }, []);
   const [connected, setConnected] = useState(true);
   const [error, setError] = useState<string>();
   const retry = useRef<number>(undefined);
   useEffect(() => {
     let ws: WebSocket | undefined;
     let closed = false;
+    setThumbs({});
     const open = () => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
       ws = new WebSocket(`${proto}://${location.host}/ws?project=${project}&feature=${feature}`);
@@ -66,7 +79,9 @@ export function useFeature(project: string, feature: string) {
         if (m.type === "state") {
           setState(m.state);
           setError(undefined);
-        } else if (m.type === "error") setError(m.message);
+        } else if (m.type === "thumbs") setThumbs((had) => ({ ...had, ...m.thumbs }));
+        else if (m.type === "pictures") setPictures(m.on);
+        else if (m.type === "error") setError(m.message);
       };
       ws.onclose = () => {
         if (closed) return;
@@ -80,6 +95,6 @@ export function useFeature(project: string, feature: string) {
       window.clearTimeout(retry.current);
       ws?.close();
     };
-  }, [project, feature]);
-  return { state, setState, connected, error };
+  }, [project, feature, setState]);
+  return { state, setState, thumbs, pictures, connected, error };
 }

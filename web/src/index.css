@@ -60,7 +60,22 @@ body {
 [data-commenting="true"] .react-flow__edge {
   cursor: crosshair;
 }
-[data-commenting="true"] [data-anchor]:not([data-anchor="edge"]):hover {
+/*
+ * Nothing on the canvas is dragged or selected, so React Flow leaves screens and lines inert and the canvas pans from
+ * anywhere over them; while commenting they take clicks again.
+ */
+[data-commenting="true"] .react-flow__node-screen {
+  /* React Flow sets pointer-events on each node inline. */
+  pointer-events: all !important;
+}
+[data-commenting="true"] .react-flow__edge.inactive {
+  pointer-events: visibleStroke;
+}
+/* Line labels are too small to read this far out. */
+.react-flow[data-no-edge-labels] [data-edge-label] {
+  display: none;
+}
+[data-commenting="true"] [data-anchor]:not([data-anchor="edge"]):not(:has([data-lane-toggle]:hover)):hover {
   outline: calc(2px * var(--df-chrome, 1)) solid var(--foreground);
   outline-offset: calc(2px * var(--df-chrome, 1));
   border-radius: 6px;
@@ -147,9 +162,14 @@ body {
   font-size: 12px;
   color: var(--muted-foreground);
 }
+/* A lane title grows only until it would reach the next lane's (--fit, model.ts); a collapsed lane's row too. */
 [data-df-lane-title] {
-  max-width: calc((var(--w) - 48px) / var(--df-lane, 1));
-  transform: scale(var(--df-lane, 1));
+  max-width: calc((var(--w) - 48px) / min(var(--df-lane, 1), var(--fit, 100)));
+  transform: scale(min(var(--df-lane, 1), var(--fit, 100)));
+  transform-origin: 0 50%;
+}
+[data-df-lane-row] {
+  transform: scale(min(var(--df-lane, 1), var(--fit, 100)));
   transform-origin: 0 50%;
 }
 

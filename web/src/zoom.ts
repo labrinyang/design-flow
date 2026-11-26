@@ -2,9 +2,19 @@ import type { Flow } from "../../src/core/flow.ts";
 import type { Layout } from "../../src/core/layout.ts";
 import { viewportOf } from "./screen-doc.ts";
 
-/** How far the canvas zooms out and in. At 8×, a phone frame is drawn at about 3.7× its CSS size. */
+/**
+ * How far the canvas zooms out and in. A small board stops at MIN_ZOOM, a big one goes on until it is a little
+ * smaller than the window (minZoomFor), as far as ZOOM_FLOOR. At 8×, a phone frame is drawn at about 3.7× its CSS size.
+ */
 export const MIN_ZOOM = 0.1;
+export const ZOOM_FLOOR = 0.01;
 export const MAX_ZOOM = 8;
+/** How far out the canvas goes for a board that fits the window at zoom `fit`. */
+export const minZoomFor = (fit: number) => Math.max(ZOOM_FLOOR, Math.min(MIN_ZOOM, fit * 0.8));
+/** Below this zoom lines drop their labels, which are too small there to read (13px text drawn under 5px). */
+export const EDGE_LABEL_MIN_ZOOM = 0.38;
+/** Below this width on screen a frame drops its id, title, note and badges, which would only crowd it. */
+export const FAR_FRAME_PX = 48;
 /** Fit to window stops here, as it did when this was the zoom limit, so one or two screens are not blown up to fill the window. */
 export const FIT_MAX_ZOOM = 2.5;
 /** One press of + or − zooms by this factor (React Flow's own step), and no single wheel event zooms more. */
@@ -53,8 +63,8 @@ export function wheelZoomStep(deltaY: number, deltaMode: number, mac: boolean): 
 }
 
 /** The viewport after zooming by 2^step around a point given in canvas pixels, within the zoom limits. */
-export function zoomAround(v: Viewport, p: { x: number; y: number }, step: number): Viewport {
-  const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * 2 ** step));
+export function zoomAround(v: Viewport, p: { x: number; y: number }, step: number, minZoom = MIN_ZOOM): Viewport {
+  const zoom = Math.min(MAX_ZOOM, Math.max(minZoom, v.zoom * 2 ** step));
   const k = zoom / v.zoom;
   return { x: p.x - (p.x - v.x) * k, y: p.y - (p.y - v.y) * k, zoom };
 }
@@ -76,7 +86,7 @@ export function fitViewport(
 ): Viewport {
   const w = Math.max(1, canvas.width - insets.left - insets.right);
   const h = Math.max(1, canvas.height - insets.top - insets.bottom);
-  const zoom = Math.min(maxZoom, Math.max(MIN_ZOOM, Math.min(w / Math.max(1, bounds.width), h / Math.max(1, bounds.height))));
+  const zoom = Math.min(maxZoom, Math.max(ZOOM_FLOOR, Math.min(w / Math.max(1, bounds.width), h / Math.max(1, bounds.height))));
   return {
     x: insets.left + (w - bounds.width * zoom) / 2 - bounds.x * zoom,
     y: insets.top + (h - bounds.height * zoom) / 2 - bounds.y * zoom,

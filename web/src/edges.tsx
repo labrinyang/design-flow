@@ -30,6 +30,8 @@ export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePos
   const [hover, setHover] = useState(false);
   const on = () => setHover(true);
   const off = () => setHover(false);
+  // A line into or out of a collapsed lane stands for several edges: a click on it comments on the canvas there.
+  const anchor = data?.folded ? undefined : "edge";
   return (
     <>
       {/* Per-edge marker inside the edge's own SVG so PNG export (which clones the viewport) keeps arrowheads. */}
@@ -53,23 +55,24 @@ export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePos
         fill="none"
         stroke="transparent"
         strokeWidth={18}
-        data-anchor="edge"
+        data-anchor={anchor}
         data-from={data?.edge.from}
         data-to={data?.edge.to}
         data-index={data?.index}
         className="react-flow__edge-interaction"
-        onMouseEnter={on}
-        onMouseLeave={off}
+        onMouseEnter={anchor && on}
+        onMouseLeave={anchor && off}
       />
       {data?.label && (
         <EdgeLabelRenderer>
           <div
-            data-anchor="edge"
+            data-anchor={anchor}
+            data-edge-label
             data-from={data.edge.from}
             data-to={data.edge.to}
             data-index={data.index}
-            onMouseEnter={on}
-            onMouseLeave={off}
+            onMouseEnter={anchor && on}
+            onMouseLeave={anchor && off}
             className="nodrag nopan pointer-events-auto absolute rounded-md px-1.5 py-px text-[13px] font-medium whitespace-nowrap"
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,

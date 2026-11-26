@@ -17,7 +17,7 @@ import {
   Toggle,
 } from "@astrafoundry/design/ui";
 import { useReactFlow, useViewport } from "@xyflow/react";
-import { Check, ChevronUp, LayoutGrid, Maximize, MessageSquare, MessageSquarePlus, Minus, Plus } from "lucide-react";
+import { Check, ChevronsDownUp, ChevronsUpDown, ChevronUp, Maximize, MessageSquare, MessageSquarePlus, Minus, Plus } from "lucide-react";
 import { useState } from "react";
 import { approveButton } from "./approve-button.ts";
 import type { FeatureState } from "./api.ts";
@@ -34,11 +34,13 @@ export function Toolbar({
   onTogglePanel,
   onFit,
   onActualSize,
-  onRelayout,
   onApprove,
   newReplies,
   minimap,
   setMinimap,
+  lanes,
+  onCollapseAll,
+  onExpandAll,
 }: {
   state: FeatureState;
   commenting: boolean;
@@ -46,12 +48,15 @@ export function Toolbar({
   onTogglePanel: () => void;
   onFit: () => void;
   onActualSize: () => void;
-  onRelayout: () => void;
   onApprove: () => Promise<void>;
   /** Threads with agent replies the user has not looked at yet. */
   newReplies: number;
   minimap: boolean;
   setMinimap: (on: boolean) => void;
+  /** How many lanes the board has, and how many of them are collapsed. */
+  lanes: { total: number; collapsed: number };
+  onCollapseAll: () => void;
+  onExpandAll: () => void;
 }) {
   const rf = useReactFlow();
   const { zoom } = useViewport();
@@ -101,10 +106,19 @@ export function Toolbar({
             <span className="w-[15px] text-center text-[12px]">1:1</span>
             {t.actualSize}
           </MenuItem>
-          <MenuItem onClick={onRelayout}>
-            <LayoutGrid size={15} />
-            {t.relayout}
-          </MenuItem>
+          {lanes.total > 0 && (
+            <>
+              <MenuSeparator />
+              <MenuItem onClick={onCollapseAll} disabled={lanes.collapsed === lanes.total}>
+                <ChevronsDownUp size={15} />
+                {t.collapseAll}
+              </MenuItem>
+              <MenuItem onClick={onExpandAll} disabled={lanes.collapsed === 0}>
+                <ChevronsUpDown size={15} />
+                {t.expandAll}
+              </MenuItem>
+            </>
+          )}
           <MenuSeparator />
           <MenuCheckboxItem checked={minimap} onCheckedChange={setMinimap}>
             {t.minimap}

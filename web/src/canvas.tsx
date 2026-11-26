@@ -30,10 +30,13 @@ import { CommentPanel, NewComment } from "./comments.tsx";
 import { markOf, placeDraft } from "./draft.ts";
 import { FlowEdgeView } from "./edges.tsx";
 import { locale, t } from "./i18n.ts";
+import { collapseLanes, commentsByLane, drawnPoint, fullPoint, type Board } from "./lanes.ts";
 import { formatLink, parseLink, type Link } from "./link.ts";
-import { LABEL_H, LANE_TITLE_OVERHANG, legendOf, NOTE_H, toReactFlow } from "./model.ts";
-import { MOTION_MIN_AREA, MOTION_SETTLE_MS, shouldPlay } from "./motion.ts";
+import { pickLive } from "./live.ts";
+import { LABEL_H, LANE_TITLE_OVERHANG, legendOf, NOTE_H, planBoard, toReactFlow, type BoardPlan, type ScreenData } from "./model.ts";
+import { MOTION_MIN_AREA, MOTION_SETTLE_MS, shouldPlay, type FrameBox } from "./motion.ts";
 import {
+  CanvasActions,
   flashInFrame,
   frameEvents,
   highlightInFrame,
@@ -41,9 +44,11 @@ import {
   locateInFrames,
   ScreenNodeView,
   setFrameMotion,
+  type CanvasActionHandlers,
   type FrameClick,
   type FrameLocated,
 } from "./nodes.tsx";
+import { cachedRoutes, routeLater, routesKey, type Routes } from "./route-cache.ts";
 import { firstNew } from "./seen.ts";
 import { useUserSeen } from "./use-seen.ts";
 import { Toolbar } from "./toolbar.tsx";
@@ -53,6 +58,7 @@ import {
   actualSizeZoom,
   chromeScale,
   COMPACT_LABEL_ZOOM,
+  EDGE_LABEL_MIN_ZOOM,
   fitViewport,
   focusZoom,
   IS_MAC,
@@ -60,11 +66,13 @@ import {
   laneTitleScale,
   MAX_ZOOM,
   MIN_ZOOM,
+  minZoomFor,
   pinScale,
   wheelZoomStep,
   zoomAround,
   type Insets,
 } from "./zoom.ts";
+
 
 const MOD = IS_MAC ? "⌘" : "Ctrl ";
 
@@ -131,7 +139,7 @@ function Pins({
   onPick,
 }: {
   state: FeatureState;
-  /** Where pins on elements are now; the others stay at their anchor's point. */
+  /** Where each open comment's pin is drawn now; those inside a collapsed lane have none (the lane's row counts them). */
   points: Map<string, Point>;
   active?: string;
   /** The pin to pulse once; n changes on every pulse, so the same pin can pulse again. */
@@ -142,7 +150,8 @@ function Pins({
   return (
     <ViewportPortal>
       {open.map((th, i) => {
-        const at = points.get(th.id) ?? th.anchor.point;
+        const at = points.get(th.id);
+        if (!at) return null;
         const where = anchorTitle(th.anchor, state.flow, locale);
         return (
         <button
@@ -170,15 +179,55 @@ function Pins({
   );
 }
 
+/** Lanes collapsed on each canvas, kept in this browser. */
+const LANES_KEY = "design-flow:lanes";
+
+function readLanes(key: string): ReadonlySet<string> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** The board's lines, routed: from this browser's cache at once, else worked out off the main thread, with step lines meanwhile. */
+function useRoutes(plan: BoardPlan | undefined): Routes | undefined {
+  const key = useMemo(() => (plan ? routesKey(plan.input) : undefined), [plan]);
+  const cached = useMemo(() => (key ? cachedRoutes(key) : undefined), [key]);
+  const [done, setDone] = useState<{ key: string; routes: Routes }>();
+  useEffect(() => {
+    if (!key || cached || !plan) return;
+    let current = true;
+    void routeLater(key, plan.input).then((routes) => {
+      if (current) setDone({ key, routes });
+    });
+    return () => {
+      current = false;
+    };
+    // The key names plan.input: a new plan with the same problem needs no new routes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, cached]);
+  return cached ?? (done && done.key === key ? done.routes : undefined);
+}
+
 function CanvasInner({ project, feature }: { project: string; feature: string }) {
-  const { state, setState, connected, error } = useFeature(project, feature);
+  const { state, setState, thumbs, pictures: drawsPictures, connected, error } = useFeature(project, feature);
   const rf = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [commenting, setCommenting] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [activeThread, setActiveThread] = useState<string>();
   const [draft, setDraft] = useState<{ anchor: Anchor }>();
-  const [playing, setPlaying] = useState(false);
+  /** Play, once its document has come: prototype.html is fetched when Play opens, not sent with every state. */
+  const [play, setPlay] = useState<{ prototype?: string }>();
+  const playing = play !== undefined;
+  const openPlay = useCallback(() => {
+    void api.prototype(project, feature).then(
+      (r) => setPlay({ prototype: r.prototype ?? undefined }),
+      () => setPlay({}),
+    );
+  }, [project, feature]);
   const fitted = useRef(false);
   const [located, setLocated] = useState<Map<string, Located>>(() => new Map());
   const [pulse, setPulse] = useState<{ id: string; n: number }>();
@@ -195,6 +244,25 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   const { seen, ready: seenReady, markSeen } = useUserSeen(project, feature, state?.threads);
   /** The thread the URL points at, set by going to it; until the panel closes, the screen in view does not replace it. */
   const linkThread = useRef<string>(undefined);
+  /** Screens shown as live frames now (live.ts); the others show their picture. */
+  const [live, setLive] = useState<ReadonlySet<string>>(() => new Set());
+  /** The screen last pointed at while commenting: a live frame, so a click lands on an element in it. */
+  const [hovered, setHovered] = useState<string>();
+  /** Lanes collapsed to one row, as the user left them on this canvas. */
+  const lanesKey = `${LANES_KEY}:${project}/${feature}`;
+  const [collapsed, setCollapsedState] = useState(() => readLanes(lanesKey));
+  useEffect(() => setCollapsedState(readLanes(lanesKey)), [lanesKey]);
+  const setCollapsed = useCallback(
+    (next: ReadonlySet<string>) => {
+      setCollapsedState(next);
+      try {
+        localStorage.setItem(lanesKey, JSON.stringify([...next]));
+      } catch {
+        /* storage blocked: the lanes stay so for this page */
+      }
+    },
+    [lanesKey],
+  );
 
   // Labels and lane titles are measured in the page's font, so lines are routed again once it has loaded.
   const [fontsReady, setFontsReady] = useState(false);
@@ -205,18 +273,39 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       .catch(() => undefined)
       .then(() => setFontsReady(true));
   }, []);
-  const graph = useMemo(
-    () => (state?.flow && state.layout ? toReactFlow(state.flow, state.layout, { measure: measureText, enterAny: t.enterAny }) : undefined),
+  const flow = state?.flow;
+  const layout = state?.layout;
+  /** The board as drawn, with collapsed lanes folded to a row, and the routing problem for its lines. */
+  const plan = useMemo(
+    () => (flow && layout ? planBoard(flow, layout, { measure: measureText, enterAny: t.enterAny, collapsed, laneSummary: t.laneScreens }) : undefined),
     // fontsReady is not read inside: it only triggers measuring again.
-    [state, fontsReady],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [flow, layout, collapsed, fontsReady],
+  );
+  const board = plan?.board;
+  const routes = useRoutes(plan);
+  const laneComments = useMemo(
+    () => (flow && layout && state ? commentsByLane(flow, layout, state.threads.filter((x) => x.status === "open").map((x) => x.anchor)) : undefined),
+    [flow, layout, state],
+  );
+  const graph = useMemo(
+    () => (plan && flow && layout ? toReactFlow(flow, layout, { plan, routes: routes ?? [], laneComments }) : undefined),
+    [plan, flow, layout, routes, laneComments],
   );
   useEffect(() => {
-    if (graph && state?.flow && state.layout) setNodes(buildNodes(graph as { nodes: Node[] }, state.flow, state.layout));
-  }, [graph, state, setNodes]);
-  // Frames forward clicks only while commenting.
+    if (graph && flow && board) setNodes(buildNodes(graph as { nodes: Node[] }, flow, board.layout));
+  }, [graph, flow, board, setNodes]);
+  // What each screen shows (a live frame, or its picture), and whether its frame forwards clicks (while commenting).
   useEffect(() => {
-    setNodes((ns) => ns.map((n) => (n.type === "screen" ? { ...n, data: { ...n.data, commenting } } : n)));
-  }, [commenting, state, setNodes]);
+    setNodes((ns) =>
+      ns.map((n) => {
+        if (n.type !== "screen") return n;
+        const d = n.data as ScreenData;
+        const next = { commenting, live: live.has(n.id), thumb: thumbs[n.id] };
+        return d.commenting === next.commenting && d.live === next.live && d.thumb === next.thumb ? n : { ...n, data: { ...d, ...next } };
+      }),
+    );
+  }, [commenting, live, thumbs, graph, setNodes]);
   // A commenting click inside a frame becomes an element (or screen) comment.
   useEffect(() => {
     const onFrame = (e: Event) => {
@@ -251,21 +340,27 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     frameEvents.addEventListener("located", onLocated);
     return () => frameEvents.removeEventListener("located", onLocated);
   }, []);
-  /** Pins of element comments sit on their element as it is now; a pin whose element is gone stays at its point. */
+  /**
+   * Where each open comment's pin is drawn: on its element as its frame last reported it, else at its point, moved
+   * up with the lanes collapsed above it. Pins inside a collapsed lane have none.
+   */
   const pinPoints = useMemo(() => {
     const out = new Map<string, Point>();
-    if (!state?.flow || !state.layout) return out;
+    if (!state || !flow || !layout || !board) return out;
     for (const th of state.threads) {
       const a = th.anchor;
-      if (th.status !== "open" || a.type !== "element") continue;
-      const at = located.get(th.id);
-      const box = state.layout.screens[a.screen];
-      const screen = state.flow.screens.find((s) => s.id === a.screen);
-      if (!at || "missing" in at || !box || !screen) continue;
-      out.set(th.id, pinOnElement(a, at, box, viewportOf(state.flow, screen).width));
+      if (th.status !== "open") continue;
+      const p = drawnPoint(a, layout, board);
+      if (!p) continue;
+      const at = a.type === "element" ? located.get(th.id) : undefined;
+      const box = a.type === "element" ? board.layout.screens[a.screen] : undefined;
+      const screen = a.type === "element" ? flow.screens.find((s) => s.id === a.screen) : undefined;
+      if (a.type === "element" && at && !("missing" in at) && box && screen)
+        out.set(th.id, pinOnElement({ ...a, point: p }, at, box, viewportOf(flow, screen).width));
+      else out.set(th.id, p);
     }
     return out;
-  }, [state, located]);
+  }, [state, flow, layout, board, located]);
   /** Show every screen with its title and note, clear of the toolbar and an open comment panel. */
   const fitToWindow = useCallback(
     (duration = 0) => {
@@ -289,23 +384,60 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     // followLink reads the state as it is then.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodesReady, nodes.length, fitToWindow]);
+  /** After every lane collapses or opens at once, the board is fitted to the window again once it is drawn. */
+  const refit = useRef(false);
+  useEffect(() => {
+    if (!refit.current || !nodes.length) return;
+    refit.current = false;
+    requestAnimationFrame(() => fitToWindow(250));
+  }, [nodes, fitToWindow]);
+  /** How far out the canvas zooms: a little past the whole board (zoom.ts). */
+  const [minZoom, setMinZoom] = useState(MIN_ZOOM);
+  const minZoomNow = useRef(minZoom);
+  useEffect(() => {
+    minZoomNow.current = minZoom;
+  }, [minZoom]);
+  useEffect(() => {
+    const update = () => {
+      const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
+      if (!canvas || !nodes.length) return;
+      setMinZoom(minZoomFor(fitViewport(visualBounds(nodes), canvas, fitInsets(canvas)).zoom));
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [nodes]);
 
-  /** Show one screen whole and readable, in the part of the canvas the panel and toolbar leave free. */
+  /** Opens these lanes, and gives the board as it will be drawn then, so the view can move on it right away. */
+  const expandLanes = useCallback(
+    (ids: string[]): Board | undefined => {
+      if (!flow || !layout) return undefined;
+      const next = new Set(collapsed);
+      for (const id of ids) next.delete(id);
+      if (next.size !== collapsed.size) setCollapsed(next);
+      return collapseLanes(flow, layout, next);
+    },
+    [flow, layout, collapsed, setCollapsed],
+  );
+
+  /** Show one screen whole and readable, in the part of the canvas the panel and toolbar leave free; its lane opens if collapsed. */
   const focusScreen = useCallback(
     (id: string, duration = 250) => {
       const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
-      const box = state?.layout?.screens[id];
-      const screen = state?.flow?.screens.find((s) => s.id === id);
-      if (!canvas || !box || !screen || !state?.flow) return;
+      const screen = flow?.screens.find((s) => s.id === id);
+      if (!canvas || !screen || !flow || !board) return;
+      const shown = screen.lane && board.collapsed.has(screen.lane) ? expandLanes([screen.lane]) : board;
+      const box = shown?.layout.screens[id];
+      if (!box) return;
       const insets = fitInsets(canvas);
       const free = { width: canvas.width - insets.left - insets.right, height: canvas.height - insets.top - insets.bottom };
-      const zoom = focusZoom({ w: box.w, h: box.h + LABEL_H }, free, viewportOf(state.flow, screen).width / box.w);
+      const zoom = focusZoom({ w: box.w, h: box.h + LABEL_H }, free, viewportOf(flow, screen).width / box.w);
       // The frame with its label above it, centred.
       const cx = box.x + box.w / 2;
       const cy = box.y + (box.h - LABEL_H) / 2;
       void rf.setViewport({ x: insets.left + free.width / 2 - cx * zoom, y: insets.top + free.height / 2 - cy * zoom, zoom }, { duration });
     },
-    [rf, state],
+    [rf, flow, board, expandLanes],
   );
 
   /** Point the URL at a thread or a screen, without adding to the history. */
@@ -319,14 +451,17 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   const jumpTo = useCallback(
     (id: string) => {
       const th = state?.threads.find((x) => x.id === id);
-      if (!th) return;
+      if (!th || !layout || !board) return;
       const a = th.anchor;
       setActiveThread(id);
       linkThread.current = id;
       writeLink({ thread: id });
       if (a.type === "element" || a.type === "screen") focusScreen(a.screen);
       else {
-        const p = pinPoints.get(id) ?? a.point;
+        // In a collapsed lane: open the lane, and go where the comment is drawn then.
+        const lane = a.type === "lane" ? a.lane : board.collapsedAt(a.point);
+        const shown = lane && board.collapsed.has(lane) ? (expandLanes([lane]) ?? board) : board;
+        const p = (shown === board ? pinPoints.get(id) : undefined) ?? drawnPoint(a, layout, shown) ?? a.point;
         void rf.setCenter(p.x, p.y, { zoom: Math.max(rf.getZoom(), 0.8), duration: 250 });
       }
       window.setTimeout(() => {
@@ -334,7 +469,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         if (th.status === "open") setPulse((p) => ({ id, n: (p?.n ?? 0) + 1 }));
       }, 280);
     },
-    [state, rf, focusScreen, pinPoints, writeLink],
+    [state, layout, board, rf, focusScreen, expandLanes, pinPoints, writeLink],
   );
 
   /** A link names a thread (an id or its first characters) or a screen. */
@@ -365,24 +500,24 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   /** Once the view settles with no thread linked: link the screen in the middle of it, if one is big enough to read there. */
   const onSettle = useCallback(
     (v: { x: number; y: number; zoom: number }, view: { width: number; height: number }) => {
-      if (linkThread.current || !state?.flow || !state.layout) return;
+      if (linkThread.current || !flow || !board) return;
       const c = { x: (view.width / 2 - v.x) / v.zoom, y: (view.height / 2 - v.y) / v.zoom };
-      const hit = state.flow.screens.find((s) => {
-        const b = state.layout!.screens[s.id];
+      const hit = flow.screens.find((s) => {
+        const b = board.layout.screens[s.id];
         return b && c.x >= b.x && c.x <= b.x + b.w && c.y >= b.y - LABEL_H && c.y <= b.y + b.h && b.w * b.h * v.zoom * v.zoom >= MOTION_MIN_AREA;
       });
       writeLink(hit ? { screen: hit.id } : {});
     },
-    [state, writeLink],
+    [flow, board, writeLink],
   );
 
   /** Screens at their real CSS size, around the middle of the canvas. */
   const actualSize = useCallback(() => {
     const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
-    if (!canvas || !state?.flow || !state.layout) return;
+    if (!canvas || !flow || !board) return;
     const center = rf.screenToFlowPosition({ x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 });
-    void rf.zoomTo(actualSizeZoom(state.flow, state.layout, center), { duration: 200 });
-  }, [rf, state]);
+    void rf.zoomTo(actualSizeZoom(flow, board.layout, center), { duration: 200 });
+  }, [rf, flow, board]);
 
   // Ctrl or ⌘ with the wheel, and a trackpad pinch, zoom the canvas wherever the pointer is (a screen,
   // the toolbar, the comment panel, the header), never the browser page. Frames forward theirs here too.
@@ -398,7 +533,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       const r = document.querySelector(".react-flow")?.getBoundingClientRect();
       if (!r) return;
       const p = { x: Math.min(Math.max(e.clientX - r.left, 0), r.width), y: Math.min(Math.max(e.clientY - r.top, 0), r.height) };
-      void rf.setViewport(zoomAround(rf.getViewport(), p, wheelZoomStep(e.deltaY, e.deltaMode, IS_MAC)));
+      void rf.setViewport(zoomAround(rf.getViewport(), p, wheelZoomStep(e.deltaY, e.deltaMode, IS_MAC), minZoomNow.current));
     };
     window.addEventListener("wheel", onWheel, { capture: true, passive: false });
     return () => window.removeEventListener("wheel", onWheel, { capture: true });
@@ -435,27 +570,65 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   }, [rf, fitToWindow, playing]);
 
 
-  const onNodeDragStop = useCallback(
-    (_: unknown, _node: Node, dragged: Node[]) => {
-      const moved = Object.fromEntries(
-        dragged.filter((n) => n.type === "screen").map((n) => [n.id, { x: Math.round(n.position.x), y: Math.round(n.position.y) }]),
-      );
-      if (Object.keys(moved).length) void api.saveLayout(project, feature, moved).then(setState);
-    },
-    [project, feature, setState],
+  const collapsedNow = useRef(collapsed);
+  const planNow = useRef(plan);
+  useEffect(() => {
+    collapsedNow.current = collapsed;
+    planNow.current = plan;
+  }, [collapsed, plan]);
+  /** What lane rows and screens ask of the canvas (nodes.tsx). */
+  const actions = useMemo<CanvasActionHandlers>(
+    () => ({
+      toggleLane: (id) => {
+        const next = new Set(collapsedNow.current);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        setCollapsed(next);
+      },
+      onlyLane: (id) => {
+        const p = planNow.current;
+        if (!flow || !layout || !p) return;
+        const next = new Set(flow.lanes.map((l) => l.id).filter((l) => l !== id));
+        setCollapsed(next);
+        // Then show that lane whole, on the board as it is drawn with the others collapsed.
+        const shown = collapseLanes(flow, layout, next);
+        const lane = shown.layout.lanes.find((l) => l.id === id);
+        const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
+        if (!lane || !canvas) return;
+        const right = Math.max(
+          p.laneX + 480,
+          ...flow.screens.filter((s) => s.lane === id && shown.layout.screens[s.id]).map((s) => shown.layout.screens[s.id].x + shown.layout.screens[s.id].w + 24),
+        );
+        const bounds = { x: p.laneX, y: lane.y - LANE_TITLE_OVERHANG, width: right - p.laneX, height: lane.height + LANE_TITLE_OVERHANG };
+        void rf.setViewport(fitViewport(bounds, canvas, fitInsets(canvas)), { duration: 250 });
+      },
+      hoverScreen: setHovered,
+    }),
+    [flow, layout, setCollapsed, rf],
   );
+  const collapseAll = useCallback(() => {
+    if (!flow) return;
+    refit.current = true;
+    setCollapsed(new Set(flow.lanes.map((l) => l.id)));
+  }, [flow, setCollapsed]);
+  const expandAll = useCallback(() => {
+    refit.current = true;
+    setCollapsed(new Set());
+  }, [setCollapsed]);
 
   const onCanvasClick = useCallback(
     (e: React.MouseEvent) => {
-      if (!commenting || !state?.layout || !state.flow) return;
+      if (!commenting || !layout || !board) return;
       const target = e.target as HTMLElement;
-      if (target.closest("[data-pin], [data-draft], [data-comment-panel], [data-toolbar], .react-flow__panel")) return;
+      if (target.closest("[data-pin], [data-draft], [data-comment-panel], [data-toolbar], [data-lane-toggle], .react-flow__panel")) return;
       const point: Point = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      const anchor = anchorFromTarget(target, { x: Math.round(point.x), y: Math.round(point.y) }, state.layout.screens);
-      setDraft({ anchor });
+      // Made on the board as drawn; kept with its point on the full board, which collapsing lanes does not move.
+      const drawn = anchorFromTarget(target, { x: Math.round(point.x), y: Math.round(point.y) }, board.layout.screens);
+      const at = fullPoint(drawn, layout, board);
+      setDraft({ anchor: { ...drawn, point: { x: Math.round(at.x), y: Math.round(at.y) } } });
       e.stopPropagation();
     },
-    [commenting, state, rf],
+    [commenting, layout, board, rf],
   );
 
   // What the comment being written points at: ring it on the canvas until the draft closes.
@@ -468,11 +641,30 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         return n.className === (on ? "df-marked" : undefined) ? n : { ...n, className: on ? "df-marked" : undefined };
       }),
     );
-  }, [mark, nodes.length, setNodes]);
+  }, [mark, nodes.length, graph, setNodes]);
   const edges = useMemo(
     () => graph?.edges.map((e) => (e.id === mark.edge ? { ...e, data: { ...e.data!, marked: true } } : e)),
     [graph, mark.edge],
   );
+
+  // What decides which screens are live frames (FrameGate).
+  const boxes = useMemo(
+    () =>
+      flow && board
+        ? flow.screens.flatMap((s) => {
+            const b = board.layout.screens[s.id];
+            return b ? [{ id: s.id, x: b.x, y: b.y, w: b.w, h: b.h }] : [];
+          })
+        : [],
+    [flow, board],
+  );
+  const pictures = useMemo(() => new Set(Object.keys(thumbs)), [thumbs]);
+  const draftScreen = draft && (draft.anchor.type === "element" || draft.anchor.type === "screen") ? draft.anchor.screen : undefined;
+  const force = useMemo(
+    () => new Set([commenting ? hovered : undefined, draftScreen].filter((x): x is string => !!x)),
+    [commenting, hovered, draftScreen],
+  );
+  const draftPoint = draft && layout && board ? (drawnPoint(draft.anchor, layout, board) ?? board.toView(draft.anchor.point)) : undefined;
 
   const exportPng = useCallback(async (withComments: boolean) => {
     const viewport = document.querySelector<HTMLElement>(".react-flow__viewport");
@@ -517,7 +709,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
 
   if (error) return <div className="p-10 text-muted-foreground">{error}</div>;
   if (!state) return null;
-  const { flow, layout, issues } = state;
+  const { issues } = state;
 
   return (
     <div className="flex h-full flex-col">
@@ -541,7 +733,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           {flow && (
             <>
               <span className="mx-1 h-5 w-px bg-border" />
-              <Button size="sm" variant="secondary" onClick={() => setPlaying(true)}>
+              <Button size="sm" variant="secondary" onClick={openPlay}>
                 <Play size={14} fill="currentColor" />
                 {t.play}
               </Button>
@@ -550,7 +742,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           )}
         </div>
       </header>
-      {playing && flow && <PlayView flow={flow} prototype={state.prototype} start={startScreen(flow)} onClose={() => setPlaying(false)} />}
+      {play && flow && <PlayView flow={flow} prototype={play.prototype} start={startScreen(flow)} onClose={() => setPlay(undefined)} />}
       {flow && (
         <ScreenSearch
           flow={flow}
@@ -580,15 +772,18 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       )}
       <main className="relative flex-1" data-commenting={commenting} onClickCapture={onCanvasClick}>
         {graph && flow && layout && (
+          <CanvasActions.Provider value={actions}>
           <ReactFlow
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
-            onNodeDragStop={onNodeDragStop}
-            nodesDraggable={!commenting}
-            minZoom={MIN_ZOOM}
+            nodesDraggable={false}
+            elementsSelectable={false}
+            nodesFocusable={false}
+            edgesFocusable={false}
+            minZoom={minZoom}
             maxZoom={MAX_ZOOM}
             proOptions={{ hideAttribution: true }}
             nodesConnectable={false}
@@ -599,7 +794,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           >
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} />
             <ChromeScale />
-            <MotionGate flow={flow} layout={layout} paused={playing} onSettle={onSettle} />
+            <FrameGate boxes={boxes} pictures={pictures} allLive={!drawsPictures} force={force} paused={playing} onLive={setLive} onSettle={onSettle} />
             <Pins
               state={state}
               points={pinPoints}
@@ -628,9 +823,10 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
               />
             )}
           </ReactFlow>
+          </CanvasActions.Provider>
         )}
         {draft && flow && (
-          <DraftAt point={draft.anchor.point}>
+          <DraftAt point={draftPoint ?? draft.anchor.point}>
             <NewComment
               focusKey={draft.anchor}
               title={anchorTitle(draft.anchor, flow, locale)}
@@ -655,10 +851,12 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           onTogglePanel={() => setPanelOpen((v) => !v)}
           onFit={() => fitToWindow(200)}
           onActualSize={actualSize}
-          onRelayout={() => void api.clearLayout(project, feature).then(setState)}
           newReplies={seenReady ? state.threads.filter((x) => firstNew(x.messages, seen[x.id]) !== undefined).length : 0}
           minimap={minimap}
           setMinimap={setMinimap}
+          lanes={{ total: flow?.lanes.length ?? 0, collapsed: board?.collapsed.size ?? 0 }}
+          onCollapseAll={collapseAll}
+          onExpandAll={expandAll}
           onApprove={() => api.approve(project, feature, state.sha256).then(setState)}
         />
         {panelOpen && (
@@ -696,44 +894,76 @@ function ChromeScale() {
     root?.style.setProperty("--df-label", String(labelScale(zoom)));
     root?.style.setProperty("--df-lane", String(laneTitleScale(zoom)));
     root?.toggleAttribute("data-compact", zoom < COMPACT_LABEL_ZOOM);
+    root?.toggleAttribute("data-no-edge-labels", zoom < EDGE_LABEL_MIN_ZOOM);
   }, [root, zoom]);
   return null;
 }
 
 /**
- * Plays each screen's animations only while its frame is on screen and big enough to watch, deciding once
- * the view has stood still (motion.ts); everything pauses while Play is open over the canvas.
+ * Decides, once the view has stood still, which screens are live frames (live.ts) and which of those play their
+ * animations (motion.ts); everything pauses while Play is open over the canvas. When only what must be live
+ * changes (the screen being commented on, a picture that came in), it decides at once.
  */
-function MotionGate({
-  flow,
-  layout,
+function FrameGate({
+  boxes,
+  pictures,
+  allLive,
+  force,
   paused,
+  onLive,
   onSettle,
 }: {
-  flow: Flow;
-  layout: Layout;
+  boxes: (FrameBox & { id: string })[];
+  pictures: ReadonlySet<string>;
+  /** The server draws no pictures (no Chrome): every screen is a live page. */
+  allLive: boolean;
+  force: ReadonlySet<string>;
   paused: boolean;
+  onLive: (live: ReadonlySet<string>) => void;
   onSettle?: (v: { x: number; y: number; zoom: number }, view: { width: number; height: number }) => void;
 }) {
   const transform = useViewportStore((s) => s.transform);
   const root = useOptionsStore((s) => s.domNode);
+  const live = useRef<ReadonlySet<string>>(new Set());
   const playingNow = useRef(new Map<string, boolean>());
+  const seen = useRef<string>(undefined);
+  const settling = useRef(false);
   useEffect(() => {
-    const timer = window.setTimeout(() => {
+    const at = transform.join(",");
+    const moved = at !== seen.current;
+    seen.current = at;
+    if (moved) settling.current = true;
+    const decide = () => {
       const r = root?.getBoundingClientRect();
       if (!r) return;
       const v = { x: transform[0], y: transform[1], zoom: transform[2] };
-      for (const s of flow.screens) {
-        const b = layout.screens[s.id];
-        if (!b) continue;
-        const on = !paused && shouldPlay(b, v, r, playingNow.current.get(s.id) ?? true);
-        playingNow.current.set(s.id, on);
-        setFrameMotion(s.id, on);
+      const next = allLive
+        ? new Set(boxes.map((b) => b.id))
+        : pickLive(
+            boxes.map((b) => ({ ...b, picture: pictures.has(b.id) })),
+            v,
+            r,
+            live.current,
+            force,
+          );
+      if (next.size !== live.current.size || [...next].some((id) => !live.current.has(id))) {
+        live.current = next;
+        onLive(next);
       }
-      onSettle?.(v, r);
-    }, MOTION_SETTLE_MS);
+      for (const b of boxes) {
+        const on = !paused && next.has(b.id) && shouldPlay(b, v, r, playingNow.current.get(b.id) ?? true);
+        playingNow.current.set(b.id, on);
+        setFrameMotion(b.id, on);
+      }
+      if (settling.current) {
+        settling.current = false;
+        onSettle?.(v, r);
+      }
+    };
+    if (!moved) return void decide();
+    const timer = window.setTimeout(decide, MOTION_SETTLE_MS);
     return () => window.clearTimeout(timer);
-  }, [transform, root, flow, layout, paused, onSettle]);
+  }, [transform, root, boxes, pictures, allLive, force, paused, onLive, onSettle]);
   return null;
 }
 

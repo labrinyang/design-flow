@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseFlow, type Flow } from "../src/core/flow.ts";
 import { layoutFlow } from "../src/core/layout.ts";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { toReactFlow } from "../web/src/model.ts";
-import { roundedPath, routeEdges, simplify, type Point, type Rect, type RouteScreen } from "../web/src/route.ts";
+import { roundedPath, routeEdges, simplify, type Point, type Rect, type RouteEdge, type RouteInput, type RouteScreen, type Zone } from "../web/src/route.ts";
 
 const box = (id: string, x: number, y: number, w = 180, h = 390): RouteScreen => ({
   id,
@@ -190,5 +191,104 @@ describe("path helpers", () => {
         { x: 20, y: 20 },
       ]),
     ).toBe("M0,0L14,0Q20,0 20,6L20,20");
+  });
+});
+
+/**
+ * A board shaped like the largest real one, built the way model.ts builds route input: 26 lanes that start further
+ * right as the flow goes on, 186 frames (mostly 480x285, some tall ones) in stacks of up to 8, 312 edges, nearly
+ * all labelled, with ways back and edges within a column, lane titles and notes, channels, zones and borders.
+ */
+function bigBoard(): RouteInput {
+  let seed = 20261126;
+  const rand = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = (n: number) => Math.floor(rand() * n);
+  const [COL, GAP, PAD, LANE_X] = [600, 24, 32, 530];
+  const screens: RouteScreen[] = [];
+  const add = (id: string, x: number, y: number, [w, h]: number[]) =>
+    screens.push({ id, frame: { x0: x, y0: y, x1: x + w, y1: y + h }, block: { x0: x, y0: y - 46, x1: x + w, y1: y + h + (pick(7) ? 0 : 44) } });
+  const counts = Array.from({ length: 26 }, () => 2 + pick(11));
+  const total = () => counts.reduce((a, b) => a + b);
+  for (let i = 0; total() !== 185; i++) counts[i % 26] += total() < 185 ? 1 : counts[i % 26] > 2 ? -1 : 0;
+  const lanes: { y: number; h: number; ids: string[][] }[] = [];
+  const obstacles: Rect[] = [];
+  let y = 40;
+  counts.forEach((n, l) => {
+    const stacks = Array.from({ length: Math.min(n, Math.max(Math.ceil(n / 8), 1 + pick(8))) }, () => 1);
+    for (let k = stacks.length; k < n; k++) {
+      let c = pick(stacks.length);
+      while (stacks[c] === 8) c = (c + 1) % stacks.length;
+      stacks[c]++;
+    }
+    const sizes = stacks.map((k) => Array.from({ length: k }, () => (pick(5) ? [480, 285] : pick(2) ? [252, 640] : [429, 640])));
+    const tall = (col: number[][]) => col.reduce((t, [, h]) => t + 46 + h + 44, 0) + (col.length - 1) * GAP;
+    const inner = Math.max(...sizes.map(tall));
+    const h = inner + 2 * PAD;
+    const c0 = 1 + Math.floor(l * 1.4);
+    const ids = sizes.map((col, c) => {
+      let sy = y + PAD + (inner - tall(col)) / 2;
+      return col.map((size, r) => {
+        const id = `s${l}-${c}-${r}`;
+        add(id, 40 + (c0 + c) * COL, sy + 46, size);
+        sy += 46 + size[1] + 44 + GAP;
+        return id;
+      });
+    });
+    obstacles.push({ x0: LANE_X + 24, y0: y - 14, x1: LANE_X + 24 + 20 + (6 + pick(24)) * 18 * 0.58 + (pick(5) ? 0 : 12 + 9 * 12 * 0.54), y1: y + 14 });
+    if (!pick(4)) obstacles.push({ x0: LANE_X + 24, y0: y + h - 32, x1: LANE_X + 24 + (10 + pick(50)) * 13 * 0.54, y1: y + h - 12 });
+    lanes.push({ y, h, ids });
+    y += h + 56;
+  });
+  add("entry", 40, (40 + y - 56) / 2 - 142.5, [480, 285]);
+  const label = () => (pick(30) ? { w: (4 + pick(24)) * 13 * 0.58 * 1.06 + 12, h: 22 } : undefined);
+  const edges: RouteEdge[] = [];
+  const one = <T>(list: T[]) => list[pick(list.length)];
+  lanes.forEach(({ ids }, l) => {
+    for (let c = 0; c + 1 < ids.length; c++) edges.push({ from: one(ids[c]), to: one(ids[c + 1]), label: label() });
+    for (const col of ids) if (col.length > 1 && pick(2)) edges.push({ from: col[0], to: col[1 + pick(col.length - 1)], label: label() });
+    const next = lanes[l + 1];
+    if (next) edges.push({ from: one(ids[ids.length - 1]), to: one(next.ids[0]), label: label() });
+  });
+  for (let l = 0; l < 3; l++) edges.push({ from: "entry", to: lanes[l].ids[0][0], label: label() });
+  while (edges.length < 310) {
+    const kind = pick(10);
+    const { ids } = lanes[pick(lanes.length)];
+    const a = one(ids);
+    const b = one(ids);
+    if (kind < 3) edges.push({ from: one(a), to: one(b), label: label() });
+    else if (kind < 5) edges.push({ from: one(b), to: one(a), label: label(), back: true });
+    else if (kind < 6 && a.length > 1) edges.push({ from: a[a.length - 1], to: a[0], label: label(), back: true });
+    else {
+      const other = lanes[pick(lanes.length)].ids;
+      edges.push({ from: one(a), to: one(one(other)), label: label(), back: !pick(4) });
+    }
+  }
+  edges.push({ from: "s3-0-0", to: "s3-0-0", label: label() }, { from: "s4-0-0", to: "missing", label: label() });
+  const width = Math.max(...screens.map((s) => s.frame.x1)) + 40;
+  return {
+    screens,
+    edges,
+    obstacles,
+    channels: lanes.flatMap((l) => [l.y + PAD / 2, l.y + l.h - PAD / 2]),
+    zones: lanes.flatMap((l): Zone[] => [
+      { y0: l.y, y1: l.y + l.h / 2, prefer: "forward" },
+      { y0: l.y + l.h / 2, y1: l.y + l.h, prefer: "back" },
+    ]),
+    borders: { x: [LANE_X, width], y: lanes.flatMap((l) => [l.y, l.y + l.h]) },
+  };
+}
+
+describe("a board the size of the largest real one", () => {
+  it("routes exactly as it did before routing got faster", () => {
+    const routes = routeEdges(bigBoard());
+    expect(routes.filter(Boolean)).toHaveLength(311);
+    // SHA-256 of the output recorded with the slower code; any change to the lines or labels changes it. When one is
+    // meant, record the new hash and bump VERSION in web/src/route-cache.ts, so browsers drop the routes they kept.
+    expect(createHash("sha256").update(JSON.stringify(routes)).digest("hex")).toBe("a5b62564db160269b4e6dd652bcd1aa5f6dfbe2425def9629a82f0c637ecf515");
   });
 });

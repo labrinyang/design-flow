@@ -145,8 +145,8 @@ export interface Clip {
 export interface Page {
   /** Runs `fn` in the page and returns what it returns; an argument that is a function arrives as one, from its source. */
   call<T>(fn: (...args: never[]) => T | Promise<T>, ...args: unknown[]): Promise<Awaited<T>>;
-  /** A PNG of the viewport, or of `clip` within it. */
-  screenshot(clip?: Clip): Promise<Buffer>;
+  /** A PNG of the viewport, or of `clip` within it; a JPEG when asked for one. */
+  screenshot(clip?: Clip, as?: { format: "jpeg"; quality: number }): Promise<Buffer>;
   close(): Promise<void>;
 }
 
@@ -291,9 +291,10 @@ async function openPage(cdp: Cdp, html: string, viewport: Viewport, scale: numbe
       if (r.exceptionDetails) throw new Error(`the screen's page threw: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
       return r.result.value as never;
     },
-    async screenshot(clip) {
+    async screenshot(clip, as) {
       const { data } = await send<{ data: string }>("Page.captureScreenshot", {
-        format: "png",
+        format: as?.format ?? "png",
+        ...(as ? { quality: as.quality } : {}),
         captureBeyondViewport: false,
         ...(clip ? { clip: { ...clip, scale: 1 } } : {}),
       });

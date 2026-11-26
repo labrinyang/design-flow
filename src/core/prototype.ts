@@ -12,7 +12,21 @@ export interface Prototype {
   jumps: { from: string; to: string; line: number }[];
 }
 
-const lineAt = (text: string, index: number) => text.slice(0, index).split("\n").length;
+/** The 1-based line of each offset in `text`, from one pass over its line breaks (slicing up to each offset was quadratic). */
+function lineIndex(text: string): (index: number) => number {
+  const breaks: number[] = [];
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) breaks.push(i);
+  return (index) => {
+    let lo = 0;
+    let hi = breaks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (breaks[mid] < index) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo + 1;
+  };
+}
 const SECTION = /<section\b[^>]*\bdata-screen\s*=\s*(["'])([^"']+)\1[^>]*>/gi;
 const JUMP = /\bdata-to\s*=\s*(["'])([^"']+)\1/gi;
 
@@ -35,14 +49,15 @@ export function readPrototype(source: string): Prototype {
   const head = h ? source.slice(h.index, h.index + h[0].length).replace(/^<head\b[^>]*>/i, "").replace(/<\/head>$/i, "").trim() : "";
   const screens: Prototype["screens"] = [];
   const jumps: Prototype["jumps"] = [];
+  const lineAt = lineIndex(text);
   SECTION.lastIndex = 0;
   for (let m = SECTION.exec(text); m; m = SECTION.exec(text)) {
     const end = closeOf(text, m.index);
     const html = source.slice(m.index, end);
     const id = m[2];
-    screens.push({ id, html, line: lineAt(text, m.index) });
+    screens.push({ id, html, line: lineAt(m.index) });
     JUMP.lastIndex = 0;
-    for (let j = JUMP.exec(html); j; j = JUMP.exec(html)) jumps.push({ from: id, to: j[2], line: lineAt(text, m.index + j.index) });
+    for (let j = JUMP.exec(html); j; j = JUMP.exec(html)) jumps.push({ from: id, to: j[2], line: lineAt(m.index + j.index) });
     SECTION.lastIndex = end;
   }
   return { head, screens, jumps };

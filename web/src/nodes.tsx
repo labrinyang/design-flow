@@ -1,9 +1,13 @@
-import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { Tooltip } from "@astrafoundry/design/ui";
+import { Handle, Position, useViewportStore, type NodeProps } from "@xyflow/react";
+import { ChevronDown, ChevronRight, Focus, MessageSquare } from "lucide-react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import type { Flow, Lane, Screen } from "../../src/core/flow.ts";
 import { t } from "./i18n.ts";
 import { LABEL_H, NOTE_H, type LaneNode, type ScreenNode } from "./model.ts";
 import type { FrameElement } from "./anchor.ts";
 import { acceptFrameLocated, acceptFrameMessage, acceptFrameWheel, frameToClient, screenDocument, viewportOf, type FrameWheelData, type Located } from "./screen-doc.ts";
+import { FAR_FRAME_PX } from "./zoom.ts";
 
 export interface FrameClick {
   screen: string;
@@ -19,9 +23,26 @@ export interface FrameLocated {
   items: Located[];
 }
 
+/** What nodes ask of the canvas. */
+export interface CanvasActionHandlers {
+  toggleLane(lane: string): void;
+  /** Collapse every other lane, open this one, and show it. */
+  onlyLane(lane: string): void;
+  /** The pointer came onto a screen while commenting, so it should be a live frame to click into. */
+  hoverScreen(screen: string): void;
+}
+export const CanvasActions = createContext<CanvasActionHandlers>({ toggleLane() {}, onlyLane() {}, hoverScreen() {} });
+
 /** Reports from every frame go through one listener on the canvas: "comment" (a commenting click) and "located". */
 export const frameEvents = new EventTarget();
-const frames = new Map<string, { screen: string; window: () => Window | null | undefined; element: () => HTMLIFrameElement | null }>();
+interface FrameEntry {
+  screen: string;
+  window: () => Window | null | undefined;
+  element: () => HTMLIFrameElement | null;
+  /** Its page is in, so messages to it are heard. */
+  loaded: boolean;
+}
+const frames = new Map<string, FrameEntry>();
 
 if (typeof window !== "undefined")
   window.addEventListener("message", (e) => {
@@ -34,12 +55,16 @@ if (typeof window !== "undefined")
   });
 
 /**
- * What the canvas has asked of each screen's frame, kept so a frame that loads again (after an edit) is
- * told again: whether its motion is paused, and which commented elements to report on.
+ * What the canvas has asked of each screen's frame, kept so a frame that loads again (after an edit, or when its
+ * screen comes back into view as a live frame) is told again: whether its motion is paused, which commented
+ * elements to report on, what to ring, and a flash asked for before it was there.
  */
 const paused = new Set<string>();
 const asked = new Map<string, { id: string; selector: string }[]>();
 let ringed: { screen: string; selector: string } | undefined;
+const flashes = new Map<string, { selector: string; at: number }>();
+/** A flash still shows if the frame loads this soon after it was asked for. */
+const FLASH_WAIT_MS = 4000;
 
 function postTo(screen: string, message: Record<string, unknown>) {
   for (const [channel, f] of frames) if (f.screen === screen) f.window()?.postMessage({ channel, ...message }, "*");
@@ -64,9 +89,16 @@ export function locateInFrames(items: Map<string, { id: string; selector: string
   }
 }
 
-/** Ring one element in a screen's frame for a moment. */
+/** Ring one element in a screen's frame for a moment; a screen shown as a picture flashes once its frame is in. */
 export function flashInFrame(screen: string, selector: string) {
-  postTo(screen, { type: "flash", selector });
+  let shown = false;
+  for (const [channel, f] of frames)
+    if (f.screen === screen && f.loaded) {
+      f.window()?.postMessage({ channel, type: "flash", selector }, "*");
+      shown = true;
+    }
+  if (shown) flashes.delete(screen);
+  else flashes.set(screen, { selector, at: Date.now() });
 }
 
 /**
@@ -102,86 +134,51 @@ export function highlightInFrame(screen: string | undefined, selector: string | 
     f.window()?.postMessage({ channel, type: "highlight", selector: f.screen === screen ? (selector ?? null) : null }, "*");
 }
 
+/**
+ * A screen on the canvas: its picture, with a live frame over it while the canvas shows it close enough to read
+ * (live.ts). Far out, its label and note are left out.
+ */
 export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
-  const { screen, tone, flow, commenting } = data;
-  const vp = viewportOf(flow, screen);
+  const { screen, tone, flow, commenting, live, thumb } = data;
   const w = data.width;
   const h = data.height;
-  const scale = w / vp.width;
-  const channel = useMemo(() => `${screen.id}:${Math.random().toString(36).slice(2)}`, [screen.id]);
-  const doc = useMemo(() => screenDocument(flow, screen, { channel }), [flow.style, flow.viewport, screen.html, screen.htmlLine === undefined, screen.viewport, channel]);
-  const frame = useRef<HTMLIFrameElement>(null);
-
-  useEffect(() => {
-    frames.set(channel, { screen: screen.id, window: () => frame.current?.contentWindow, element: () => frame.current });
-    return () => void frames.delete(channel);
-  }, [channel, screen.id]);
-
-  useEffect(() => {
-    const post = () => frame.current?.contentWindow?.postMessage({ channel, type: "commenting", on: commenting }, "*");
-    post();
-    const el = frame.current;
-    el?.addEventListener("load", post);
-    return () => el?.removeEventListener("load", post);
-  }, [commenting, channel, doc]);
-
-  // A frame that loads again starts over: tell it again whether to pause, what to report on, and what to ring.
-  useEffect(() => {
-    const el = frame.current;
-    const again = () => {
-      const win = el?.contentWindow;
-      if (!win) return;
-      if (paused.has(screen.id)) win.postMessage({ channel, type: "motion", on: false }, "*");
-      const items = asked.get(screen.id);
-      if (items) win.postMessage({ channel, type: "locate", items }, "*");
-      if (ringed?.screen === screen.id) win.postMessage({ channel, type: "highlight", selector: ringed.selector }, "*");
-    };
-    el?.addEventListener("load", again);
-    return () => el?.removeEventListener("load", again);
-  }, [channel, screen.id]);
-
+  const far = useViewportStore((s) => s.transform[2] * w < FAR_FRAME_PX);
+  const actions = useContext(CanvasActions);
   return (
     <div data-tone={tone} className="relative" style={{ width: w, height: h }}>
       <Handle id="in-left" type="target" position={Position.Left} />
       <Handle id="in-right" type="target" position={Position.Right} />
       <Handle id="out-right" type="source" position={Position.Right} />
       <Handle id="out-left" type="source" position={Position.Left} />
-      <div
-        data-anchor="screen"
-        data-screen={screen.id}
-        data-df-label
-        className="absolute bottom-full left-0 flex flex-col justify-end pb-1.5 text-[14px] leading-tight"
-        style={{ height: LABEL_H, "--w": `${w}px` } as CSSProperties}
-      >
-        <span data-id className="shrink-0 text-[12px] font-medium tracking-wide tabular-nums" style={{ color: "var(--tone)" }}>
-          {screen.id}
-        </span>
-        <span data-title className="min-w-0 truncate text-foreground">
-          {screen.title}
-        </span>
-      </div>
+      {!far && (
+        <div
+          data-anchor="screen"
+          data-screen={screen.id}
+          data-df-label
+          className="absolute bottom-full left-0 flex flex-col justify-end pb-1.5 text-[14px] leading-tight"
+          style={{ height: LABEL_H, "--w": `${w}px` } as CSSProperties}
+        >
+          <span data-id className="shrink-0 text-[12px] font-medium tracking-wide tabular-nums" style={{ color: "var(--tone)" }}>
+            {screen.id}
+          </span>
+          <span data-title className="min-w-0 truncate text-foreground">
+            {screen.title}
+          </span>
+        </div>
+      )}
       <div
         data-anchor="screen"
         data-screen={screen.id}
         data-frame
         className="relative h-full overflow-hidden rounded-xl shadow-2 ring-1 ring-border"
         style={{ background: "white" }}
+        onPointerEnter={commenting ? () => actions.hoverScreen(screen.id) : undefined}
       >
-        <iframe
-          ref={frame}
-          title={`${screen.id} ${screen.title}`}
-          sandbox="allow-scripts"
-          data-channel={channel}
-          srcDoc={doc}
-          className="nodrag nopan origin-top-left border-0"
-          style={{
-            width: vp.width,
-            height: vp.height,
-            transform: `scale(${scale})`,
-            pointerEvents: commenting ? "auto" : "none",
-          }}
-        />
-        {screen.badges.length > 0 && (
+        {thumb && (
+          <img src={thumb} alt={`${screen.id} ${screen.title}`} draggable={false} decoding="async" className="pointer-events-none absolute inset-0 size-full select-none" />
+        )}
+        {live && <LiveFrame flow={flow} screen={screen} width={w} commenting={commenting} />}
+        {!far && screen.badges.length > 0 && (
           <div className="pointer-events-none absolute right-2 bottom-2 flex gap-1">
             {screen.badges.map((b) => (
               <span key={b} className="rounded-full bg-substrate px-2 py-0.5 text-[10px] text-substrate-hi">
@@ -191,7 +188,7 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
           </div>
         )}
       </div>
-      {screen.note && (
+      {!far && screen.note && (
         <div
           className="absolute inset-x-0 pt-2 text-[12px] leading-snug text-pretty text-muted-foreground"
           style={{ top: h, height: NOTE_H }}
@@ -203,28 +200,157 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
   );
 }
 
+/** A screen as a live page in its own sandboxed frame, scaled into its box, which the canvas talks to by message. */
+function LiveFrame({ flow, screen, width, commenting }: { flow: Flow; screen: Screen; width: number; commenting: boolean }) {
+  const vp = viewportOf(flow, screen);
+  const channel = useMemo(() => `${screen.id}:${Math.random().toString(36).slice(2)}`, [screen.id]);
+  const doc = useMemo(() => screenDocument(flow, screen, { channel }), [flow.style, flow.viewport, screen.html, screen.htmlLine === undefined, screen.viewport, channel]);
+  const frame = useRef<HTMLIFrameElement>(null);
+  // Hidden until its page is in, so the picture under it shows meanwhile.
+  const [ready, setReady] = useState(false);
+
+  // Before paint, so the first load is not missed: tell a frame that loads (again) what the canvas has asked of it.
+  useLayoutEffect(() => {
+    const el = frame.current;
+    const entry: FrameEntry = { screen: screen.id, window: () => el?.contentWindow, element: () => el, loaded: false };
+    frames.set(channel, entry);
+    const again = () => {
+      entry.loaded = true;
+      const win = el?.contentWindow;
+      if (!win) return;
+      if (paused.has(screen.id)) win.postMessage({ channel, type: "motion", on: false }, "*");
+      const items = asked.get(screen.id);
+      if (items) win.postMessage({ channel, type: "locate", items }, "*");
+      if (ringed?.screen === screen.id) win.postMessage({ channel, type: "highlight", selector: ringed.selector }, "*");
+      const flash = flashes.get(screen.id);
+      flashes.delete(screen.id);
+      if (flash && Date.now() - flash.at < FLASH_WAIT_MS) win.postMessage({ channel, type: "flash", selector: flash.selector }, "*");
+    };
+    el?.addEventListener("load", again);
+    return () => {
+      el?.removeEventListener("load", again);
+      frames.delete(channel);
+    };
+  }, [channel, screen.id]);
+
+  useEffect(() => {
+    const post = () => frame.current?.contentWindow?.postMessage({ channel, type: "commenting", on: commenting }, "*");
+    post();
+    const el = frame.current;
+    el?.addEventListener("load", post);
+    return () => el?.removeEventListener("load", post);
+  }, [commenting, channel, doc]);
+
+  return (
+    <iframe
+      ref={frame}
+      title={`${screen.id} ${screen.title}`}
+      sandbox="allow-scripts"
+      data-channel={channel}
+      srcDoc={doc}
+      onLoad={() => setReady(true)}
+      className="nodrag nopan absolute top-0 left-0 origin-top-left border-0"
+      style={{
+        width: vp.width,
+        height: vp.height,
+        transform: `scale(${width / vp.width})`,
+        pointerEvents: commenting ? "auto" : "none",
+        opacity: ready ? 1 : 0,
+      }}
+    />
+  );
+}
+
+/** Collapses every other lane and shows this one. */
+function OnlyLane({ lane }: { lane: Lane }) {
+  const actions = useContext(CanvasActions);
+  return (
+    <Tooltip content={t.onlyLane} side="top">
+      <button
+        type="button"
+        data-lane-toggle
+        aria-label={t.onlyLaneNamed(lane.title)}
+        className="nodrag nopan grid size-5 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground hover:text-foreground"
+        style={{ pointerEvents: "auto" }}
+        onClick={() => actions.onlyLane(lane.id)}
+      >
+        <Focus size={14} />
+      </button>
+    </Tooltip>
+  );
+}
+
 export function LaneNodeView({ data }: NodeProps<LaneNode>) {
-  const { lane, width, height } = data;
+  const { lane, width, height, fit, collapsed } = data;
+  const actions = useContext(CanvasActions);
+  const box = {
+    borderColor: "color-mix(in oklab, var(--tone) 30%, transparent)",
+    background: "color-mix(in oklab, var(--tone) 6%, var(--canvas))",
+  };
+  if (collapsed)
+    return (
+      // Collapsed: one row with the title and what the lane holds; lines into and out of the lane end on it.
+      <div data-tone={lane.tone} data-anchor="lane" data-lane={lane.id} data-collapsed className="relative" style={{ width, height }}>
+        <Handle id="in-left" type="target" position={Position.Left} />
+        <Handle id="in-right" type="target" position={Position.Right} />
+        <Handle id="out-right" type="source" position={Position.Right} />
+        <Handle id="out-left" type="source" position={Position.Left} />
+        <div
+          data-df-lane-row
+          className="absolute inset-x-0 top-3 flex h-10 items-center gap-2 rounded-2xl border-[1.5px] border-dashed px-3 text-[18px] font-medium whitespace-nowrap"
+          style={{ ...box, color: "var(--tone)", "--fit": String(fit) } as CSSProperties}
+        >
+          <button
+            type="button"
+            data-lane-toggle
+            aria-expanded={false}
+            aria-label={t.expandLane(lane.title)}
+            className="nodrag nopan flex cursor-pointer items-center gap-2"
+            style={{ pointerEvents: "auto" }}
+            onClick={() => actions.toggleLane(lane.id)}
+          >
+            <ChevronRight size={16} className="shrink-0" />
+            {lane.title}
+            <span className="text-[13px] font-normal text-muted-foreground">{t.laneScreens(collapsed.screens)}</span>
+          </button>
+          {collapsed.comments > 0 && (
+            <span aria-label={t.laneComments(collapsed.comments)} className="flex items-center gap-1 text-[13px] font-normal text-muted-foreground tabular-nums">
+              <MessageSquare size={13} />
+              {collapsed.comments}
+            </span>
+          )}
+          <span className="ml-auto" />
+          <OnlyLane lane={lane} />
+        </div>
+      </div>
+    );
   return (
     <div
       data-tone={lane.tone}
       data-anchor="lane"
       data-lane={lane.id}
       className="relative rounded-3xl border-[1.5px] border-dashed"
-      style={{
-        width,
-        height,
-        borderColor: "color-mix(in oklab, var(--tone) 30%, transparent)",
-        background: "color-mix(in oklab, var(--tone) 6%, var(--canvas))",
-      }}
+      style={{ width, height, ...box }}
     >
       <div
         data-df-lane-title
-        className="absolute -top-3.5 left-6 flex items-baseline gap-3 overflow-hidden px-2.5 text-[18px] font-medium whitespace-nowrap"
-        style={{ color: "var(--tone)", background: "var(--canvas)", "--w": `${width}px` } as CSSProperties}
+        className="absolute -top-3.5 left-6 flex items-center gap-1.5 overflow-hidden px-2.5 text-[18px] font-medium whitespace-nowrap"
+        style={{ color: "var(--tone)", background: "var(--canvas)", "--w": `${width}px`, "--fit": String(fit) } as CSSProperties}
       >
-        {lane.title}
-        {lane.enter === "any" && <span className="text-[12px] font-normal text-muted-foreground">{t.enterAny}</span>}
+        <button
+          type="button"
+          data-lane-toggle
+          aria-expanded
+          aria-label={t.collapseLane(lane.title)}
+          className="nodrag nopan flex cursor-pointer items-center gap-1.5"
+          style={{ pointerEvents: "auto" }}
+          onClick={() => actions.toggleLane(lane.id)}
+        >
+          <ChevronDown size={16} className="shrink-0" />
+          {lane.title}
+        </button>
+        {lane.enter === "any" && <span className="ml-1.5 text-[12px] font-normal text-muted-foreground">{t.enterAny}</span>}
+        <OnlyLane lane={lane} />
       </div>
       {lane.note && <div className="absolute bottom-3 left-6 text-[13px] text-muted-foreground">{lane.note}</div>}
     </div>

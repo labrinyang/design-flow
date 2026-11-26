@@ -36,7 +36,7 @@ Run it from the project root (or pass `--project-dir <path>`). One local server 
 9. **Do not write code for this feature until `design-flow status <feature>` prints `approved`.** Approval arrives as a `[design-flow] … APPROVED` line. Changing `flow.yaml` after approval makes it `stale`; ask for approval again.
 10. Build from the approved flow. Screen ids (`P03`) are the names to use when you talk about screens.
 
-Do not edit `layout.json`, `comments.json`, `approval.json` or `.last-valid.yaml`; the tool owns them. Approval covers `flow.yaml` and `prototype.html` together: changing either makes it `stale`.
+Do not edit `comments.json`, `approval.json` or `.last-valid.yaml`; the tool owns them. Approval covers `flow.yaml` and `prototype.html` together: changing either makes it `stale`.
 
 ## Answering a comment
 
@@ -147,7 +147,7 @@ Screen HTML rules:
 - Put `data-id="…"` on the elements people will talk about (buttons, fields, list items). Comments on them are anchored by that id, so they survive edits; without it they anchor by position.
 - A comment on an element arrives as `Screen P02 Choose payment · button "Bank card" ([data-id="card"])`.
 
-Layout is automatic: lanes are rows, the flow runs left to right, branches of one step stack in one column. Never compute coordinates; the user drags frames when they want.
+Layout is automatic: lanes are rows, the flow runs left to right, branches of one step stack in one column. Never compute coordinates.
 
 ## Commands
 

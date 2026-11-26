@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { startServer, type Server } from "../src/server/server.ts";
+import { startServer, type Server, type ServerOptions } from "../src/server/server.ts";
 
 const FLOW = `version: 1
 title: Demo
@@ -27,9 +27,9 @@ function project() {
   return dir;
 }
 
-async function boot() {
+async function boot(extra: Partial<ServerOptions> = {}) {
   const home = mkdtempSync(join(tmpdir(), "df-home-"));
-  server = await startServer({ port: 0, home });
+  server = await startServer({ port: 0, home, ...extra });
   return { home, base: `http://127.0.0.1:${server.port}` };
 }
 
@@ -168,15 +168,15 @@ describe("server", () => {
     expect(state.issues.length).toBeGreaterThan(0);
   });
 
-  it("saves dragged positions and approves", async () => {
+  it("approves, and lays screens out without saved positions", async () => {
     const { base } = await boot();
     const dir = project();
+    // Screens no longer move by hand: a layout.json left from before is ignored.
+    writeFileSync(join(dir, ".design-flow", "demo", "layout.json"), JSON.stringify({ A: { x: 900, y: 900 } }));
     const { key } = await json(await post(`${base}/api/projects`, { dir }));
     const f = `${base}/api/projects/${key}/features/demo`;
-    await json(await post(`${f}/layout`, { A: { x: 900, y: 900 } }));
-    expect((await json(await fetch(f))).layout.screens.A).toMatchObject({ x: 900, pinned: true });
-    await json(await fetch(`${f}/layout`, { method: "DELETE" }));
-    expect((await json(await fetch(f))).layout.screens.A.pinned).toBe(false);
+    expect((await json(await fetch(f))).layout.screens.A).toMatchObject({ pinned: false });
+    expect((await fetch(`${f}/layout`, { method: "POST", body: "{}" })).status).toBe(404);
     await json(await post(`${f}/approve`, { sha256: (await json(await fetch(f))).sha256 }));
     expect((await json(await fetch(f))).status.status).toBe("approved");
   });
@@ -310,7 +310,7 @@ describe("screen html", () => {
     ws.close();
   });
 
-  it("fills screens from prototype.html, one section each, and sends the whole document for Play", async () => {
+  it("fills screens from prototype.html, one section each, and sends the whole document only when Play asks", async () => {
     const { base } = await boot();
     const dir = project();
     const fd = join(dir, ".design-flow", "demo");
@@ -323,7 +323,9 @@ describe("screen html", () => {
     expect(st.issues).toEqual([]);
     expect(st.flow.screens[1].html).toBe(`<section data-screen="B"><p>Beta page</p></section>`);
     expect(st.flow.style).toContain(".x{color:red}");
-    expect(st.prototype).toContain(`<section data-screen="A">`);
+    expect(st.prototype).toBeUndefined();
+    const play = await json(await fetch(`${base}/api/projects/${key}/features/demo/prototype`));
+    expect(play.prototype).toContain(`<section data-screen="A">`);
   });
 
   it("tells the canvas which prototype.html line each screen's section starts on", async () => {
@@ -409,5 +411,89 @@ describe("screen html", () => {
     const res = await post(`${base}/api/projects/${key}/features/demo/share`, {});
     expect(res.status).toBe(502);
     expect((await res.json()).error).toMatch(/gh auth login/);
+  });
+});
+
+describe("pictures of screens", () => {
+  const PROTO = (b: string, top = "") =>
+    `${top}<html><head><style>p{margin:0}</style></head><body>
+<section data-screen="A"><p>a</p></section>
+<section data-screen="B"><p>${b}</p></section>
+</body></html>`;
+
+  it("draws each screen once, sends pictures as they are drawn, and redraws only the screen that changed", async () => {
+    const drawn: { html: string; viewport: { width: number; height: number }; scale: number }[] = [];
+    const pictures = {
+      async draw(html: string, viewport: { width: number; height: number }, scale: number) {
+        drawn.push({ html, viewport, scale });
+        return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+      },
+      async close() {},
+    };
+    const { base } = await boot({ pictures });
+    const dir = project();
+    const proto = join(dir, ".design-flow", "demo", "prototype.html");
+    writeFileSync(proto, PROTO("b"));
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const ws = new WebSocket(`${base.replace("http", "ws")}/ws?project=${key}&feature=demo`);
+    const seen: Record<string, string> = {};
+    await nextMessage(ws, (m) => {
+      if (m.type === "state") Object.assign(seen, m.state.thumbs);
+      if (m.type === "thumbs") Object.assign(seen, m.thumbs);
+      return !!(seen.A && seen.B);
+    });
+    const first = { ...seen };
+    expect(drawn.map((d) => d.html.includes("<p>a</p>") ? "A" : "B").sort()).toEqual(["A", "B"]);
+    // Drawn as the screen's own page, without the line marks that move when lines above it do.
+    expect(drawn[0].html).not.toContain("data-df-line");
+    expect(drawn[0].html).toContain("p{margin:0}");
+    const res = await fetch(base + first.A);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/jpeg");
+    expect((await json(await fetch(`${base}/api/projects/${key}/features/demo`))).thumbs).toEqual(first);
+
+    // Lines added above both screens move them but change neither picture.
+    writeFileSync(proto, PROTO("b", "\n\n"));
+    await nextMessage(ws, (m) => m.type === "state");
+    await new Promise((r) => setTimeout(r, 400));
+    expect(drawn).toHaveLength(2);
+
+    // Only B changes: only B is drawn again.
+    writeFileSync(proto, PROTO("b2", "\n\n"));
+    const again = await nextMessage(ws, (m) => m.type === "thumbs" && m.thumbs.B);
+    expect(again.thumbs.B).not.toBe(first.B);
+    expect(drawn).toHaveLength(3);
+    expect(drawn[2].html).toContain("<p>b2</p>");
+    ws.close();
+  });
+
+  it("says when there is no browser to draw with, so canvases show every screen live", async () => {
+    const pictures = {
+      draw: async () => {
+        throw Object.assign(new Error("no Chrome"), { launch: true });
+      },
+      close: async () => {},
+    };
+    const { base } = await boot({ pictures });
+    const dir = project();
+    writeFileSync(join(dir, ".design-flow", "demo", "prototype.html"), PROTO("b"));
+    const { key } = await json(await post(`${base}/api/projects`, { dir }));
+    const ws = new WebSocket(`${base.replace("http", "ws")}/ws?project=${key}&feature=demo`);
+    const seen: any[] = [];
+    ws.on("message", (d) => seen.push(JSON.parse(String(d))));
+    await nextMessage(ws, (m) => m.type === "pictures");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(seen.find((m) => m.type === "pictures").on).toBe(false);
+    // Whatever a canvas heard last tells it there are no pictures.
+    const last = seen.filter((m) => m.type === "state" || m.type === "pictures").at(-1);
+    expect(last.type === "pictures" ? last.on : last.state.pictures).toBe(false);
+    expect((await json(await fetch(`${base}/api/projects/${key}/features/demo`))).pictures).toBe(false);
+    ws.close();
+  });
+
+  it("serves only picture names it could have made", async () => {
+    const { base } = await boot({ pictures: { draw: async () => Buffer.from([]), close: async () => {} } });
+    expect((await fetch(`${base}/thumbs/${"0".repeat(40)}.jpg`)).status).toBe(404);
+    expect((await fetch(`${base}/thumbs/../server.json`)).status).not.toBe(200);
   });
 });

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_PORT, startServer } from "./server.ts";
+import { chromePictures } from "./thumbs.ts";
 
 declare const __DESIGN_FLOW_BUNDLE__: boolean | undefined;
 
@@ -16,7 +17,7 @@ const webRoot = [join(here, "web"), join(here, "..", "..", "web")].find((d) => e
 const locale = (process.env.DESIGN_FLOW_LOCALE ?? Intl.DateTimeFormat().resolvedOptions().locale).startsWith("zh") ? "zh" : "en";
 
 export function runServer(): Promise<void> {
-  return startServer({ port, home, webRoot, locale }).then(
+  return startServer({ port, home, webRoot, locale, pictures: chromePictures(), log }).then(
   (s) => {
     log(`listening on ${s.port}${webRoot ? "" : " (no web build found)"}`);
     const stop = () => s.close().then(() => process.exit(0));
