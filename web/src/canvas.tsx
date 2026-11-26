@@ -18,7 +18,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { toPng } from "html-to-image";
-import { ArrowLeft, Play, Search } from "lucide-react";
+import { ArrowLeft, PanelLeft, Play, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Anchor, Point } from "../../src/core/comments.ts";
 import type { Flow } from "../../src/core/flow.ts";
@@ -33,7 +33,8 @@ import { locale, t } from "./i18n.ts";
 import { collapseLanes, commentsByLane, drawnPoint, fullPoint, type Board } from "./lanes.ts";
 import { formatLink, parseLink, type Link } from "./link.ts";
 import { pickLive } from "./live.ts";
-import { LABEL_H, LANE_TITLE_OVERHANG, legendOf, NOTE_H, planBoard, toReactFlow, type BoardPlan, type ScreenData } from "./model.ts";
+import { LanesPanel } from "./lanes-panel.tsx";
+import { focusEdges, inLane, LABEL_H, LANE_TITLE_OVERHANG, NOTE_H, planBoard, toReactFlow, type ScreenData } from "./model.ts";
 import { MOTION_MIN_AREA, MOTION_SETTLE_MS, shouldPlay, type FrameBox } from "./motion.ts";
 import {
   CanvasActions,
@@ -49,6 +50,7 @@ import {
   type FrameLocated,
 } from "./nodes.tsx";
 import { cachedRoutes, routeLater, routesKey, type Routes } from "./route-cache.ts";
+import type { RouteInput } from "./route.ts";
 import { firstNew } from "./seen.ts";
 import { useUserSeen } from "./use-seen.ts";
 import { Toolbar } from "./toolbar.tsx";
@@ -67,6 +69,7 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   minZoomFor,
+  openViewport,
   pinScale,
   wheelZoomStep,
   zoomAround,
@@ -91,27 +94,6 @@ function NotesNode({ data }: { data: { notes: string[] } }) {
 
 const nodeTypes: NodeTypes = { screen: ScreenNodeView, lane: LaneNodeView, notes: NotesNode };
 const edgeTypes: EdgeTypes = { flow: FlowEdgeView };
-
-export function Legend({ flow }: { flow: Flow }) {
-  const items = legendOf(flow);
-  if (!items.length) return null;
-  return (
-    <div aria-label={t.legend} className="hidden flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground xl:flex">
-      {items.map((it, i) =>
-        it.kind === "lane" ? (
-          <span key={i} data-tone={it.tone} className="flex items-center gap-1.5">
-            <i className="inline-block size-3 rounded-sm" style={{ background: "var(--tone)" }} />
-            {it.label}
-          </span>
-        ) : (
-          <span key={i} className="rounded-full bg-substrate px-2 py-0.5 text-[11px] text-substrate-hi">
-            {t.badge[it.badge]}
-          </span>
-        ),
-      )}
-    </div>
-  );
-}
 
 /** Text width in canvas pixels, in the page's own font. */
 const measureText = (() => {
@@ -191,21 +173,21 @@ function readLanes(key: string): ReadonlySet<string> {
   }
 }
 
-/** The board's lines, routed: from this browser's cache at once, else worked out off the main thread, with step lines meanwhile. */
-function useRoutes(plan: BoardPlan | undefined): Routes | undefined {
-  const key = useMemo(() => (plan ? routesKey(plan.input) : undefined), [plan]);
+/** Lines routed: from this browser's cache at once, else worked out off the main thread, with step lines meanwhile. */
+function useRoutes(input: RouteInput | undefined): Routes | undefined {
+  const key = useMemo(() => (input ? routesKey(input) : undefined), [input]);
   const cached = useMemo(() => (key ? cachedRoutes(key) : undefined), [key]);
   const [done, setDone] = useState<{ key: string; routes: Routes }>();
   useEffect(() => {
-    if (!key || cached || !plan) return;
+    if (!key || cached || !input) return;
     let current = true;
-    void routeLater(key, plan.input).then((routes) => {
+    void routeLater(key, input).then((routes) => {
       if (current) setDone({ key, routes });
     });
     return () => {
       current = false;
     };
-    // The key names plan.input: a new plan with the same problem needs no new routes.
+    // The key names the input: a new plan with the same problem needs no new routes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, cached]);
   return cached ?? (done && done.key === key ? done.routes : undefined);
@@ -248,6 +230,38 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   const [live, setLive] = useState<ReadonlySet<string>>(() => new Set());
   /** The screen last pointed at while commenting: a live frame, so a click lands on an element in it. */
   const [hovered, setHovered] = useState<string>();
+  /** The screen under the pointer, and the one a click holds: in focus, its lines show and the rest fall back. */
+  const [pointed, setPointed] = useState<string>();
+  const [held, setHeld] = useState<string>();
+  const pointTimer = useRef<number>(undefined);
+  /** When the view last moved, and where the pointer is: while the view moves, screens slide under a still pointer. */
+  const motion = useRef<{ at: number; timer?: number }>({ at: 0 });
+  const pointer = useRef<{ x: number; y: number }>(undefined);
+  /** Each time the view moves; once it stops, the lines of the screen under the pointer then, if any. */
+  const onViewMove = useCallback(() => {
+    const m = motion.current;
+    m.at = performance.now();
+    window.clearTimeout(pointTimer.current);
+    window.clearTimeout(m.timer);
+    m.timer = window.setTimeout(() => {
+      const p = pointer.current;
+      const node = p ? document.elementFromPoint(p.x, p.y)?.closest<HTMLElement>(".react-flow__node-screen") : undefined;
+      setPointed(node?.dataset.id);
+    }, POINT_SETTLE_MS);
+  }, []);
+  /** The screen a link chip just took the view to: it rings once. */
+  const [arrived, setArrived] = useState<string>();
+  const arrivedTimer = useRef<number>(undefined);
+  /** The lanes panel, open or closed as the user left it. */
+  const [lanesOpen, setLanesOpenState] = useState(() => localStorage.getItem(LANES_PANEL_KEY) !== "off");
+  const setLanesOpen = useCallback((on: boolean) => {
+    setLanesOpenState(on);
+    try {
+      localStorage.setItem(LANES_PANEL_KEY, on ? "on" : "off");
+    } catch {
+      /* storage blocked: the choice lasts for this page */
+    }
+  }, []);
   /** Lanes collapsed to one row, as the user left them on this canvas. */
   const lanesKey = `${LANES_KEY}:${project}/${feature}`;
   const [collapsed, setCollapsedState] = useState(() => readLanes(lanesKey));
@@ -283,7 +297,20 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     [flow, layout, collapsed, fontsReady],
   );
   const board = plan?.board;
-  const routes = useRoutes(plan);
+  const routes = useRoutes(plan?.input);
+  // Links between lanes are routed after the lines, for when a screen is in focus.
+  const linkRoutes = useRoutes(routes ? plan?.linksInput : undefined);
+  const focus = !commenting && board ? [held, pointed].find((id) => !!id && !board.hidden.has(id)) : undefined;
+  /** The screen in focus and the screens its edges join. */
+  const near = useMemo(() => {
+    if (!focus || !flow) return undefined;
+    const s = new Set([focus]);
+    for (const e of flow.edges) {
+      if (e.from === focus) s.add(e.to);
+      if (e.to === focus) s.add(e.from);
+    }
+    return s;
+  }, [focus, flow]);
   const laneComments = useMemo(
     () => (flow && layout && state ? commentsByLane(flow, layout, state.threads.filter((x) => x.status === "open").map((x) => x.anchor)) : undefined),
     [flow, layout, state],
@@ -350,6 +377,22 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     for (const th of state.threads) {
       const a = th.anchor;
       if (th.status !== "open") continue;
+      if (a.type === "edge") {
+        // On its line where the line is drawn (at its label), else on the link chips of the screen it leaves.
+        const at = flow.edges.findIndex((x, i) => i === a.edge.index && x.from === a.edge.from && x.to === a.edge.to);
+        const index = at >= 0 ? at : flow.edges.findIndex((x) => x.from === a.edge.from && x.to === a.edge.to);
+        const line = graph?.edges.find((x) => x.data?.index === index);
+        if (line?.data?.route?.label) {
+          out.set(th.id, line.data.route.label);
+          continue;
+        }
+        const e = flow.edges[index];
+        if (e && !inLane(flow, e)) {
+          const box = board.layout.screens[e.from];
+          if (box) out.set(th.id, { x: box.x + box.w - 12, y: box.y });
+          continue;
+        }
+      }
       const p = drawnPoint(a, layout, board);
       if (!p) continue;
       const at = a.type === "element" ? located.get(th.id) : undefined;
@@ -357,10 +400,12 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       const screen = a.type === "element" ? flow.screens.find((s) => s.id === a.screen) : undefined;
       if (a.type === "element" && at && !("missing" in at) && box && screen)
         out.set(th.id, pinOnElement({ ...a, point: p }, at, box, viewportOf(flow, screen).width));
+      // Until its frame is live and says where the element is: where the element was in its page when commented on.
+      else if (a.type === "element" && a.box && box && screen) out.set(th.id, pinOnElement({ ...a, point: p }, a.box, box, viewportOf(flow, screen).width));
       else out.set(th.id, p);
     }
     return out;
-  }, [state, flow, layout, board, located]);
+  }, [state, flow, layout, board, located, graph]);
   /** Show every screen with its title and note, clear of the toolbar and an open comment panel. */
   const fitToWindow = useCallback(
     (duration = 0) => {
@@ -371,19 +416,26 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     },
     [rf],
   );
-  // The first fit waits until every node is measured, so the notes and lane sizes count.
+  /** The first view: the whole board, or the top of a tall one at the window's width (zoom.ts). */
+  const openToWindow = useCallback(() => {
+    const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
+    const ns = rf.getNodes();
+    if (!canvas || !ns.length) return;
+    void rf.setViewport(openViewport(visualBounds(ns), canvas, fitInsets(canvas)));
+  }, [rf]);
+  // The first view waits until every node is measured, so the notes and lane sizes count.
   const nodesReady = useNodesInitialized();
   useEffect(() => {
     if (nodesReady && nodes.length && !fitted.current) {
       fitted.current = true;
       requestAnimationFrame(() => {
-        fitToWindow();
+        openToWindow();
         followLink(parseLink(location.hash));
       });
     }
     // followLink reads the state as it is then.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesReady, nodes.length, fitToWindow]);
+  }, [nodesReady, nodes.length, openToWindow]);
   /** After every lane collapses or opens at once, the board is fitted to the window again once it is drawn. */
   const refit = useRef(false);
   useEffect(() => {
@@ -439,6 +491,11 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     },
     [rf, flow, board, expandLanes],
   );
+
+  const focusScreenNow = useRef(focusScreen);
+  useEffect(() => {
+    focusScreenNow.current = focusScreen;
+  }, [focusScreen]);
 
   /** Point the URL at a thread or a screen, without adding to the history. */
   const writeLink = useCallback((link: Link) => {
@@ -497,11 +554,18 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     return () => window.removeEventListener("hashchange", onHash);
   }, [followLink]);
 
-  /** Once the view settles with no thread linked: link the screen in the middle of it, if one is big enough to read there. */
+  /**
+   * Once the view settles with no thread linked: link the screen in the middle of it (of the part the panels leave
+   * free, where going to a screen puts it), if one is big enough to read there.
+   */
   const onSettle = useCallback(
-    (v: { x: number; y: number; zoom: number }, view: { width: number; height: number }) => {
+    (v: { x: number; y: number; zoom: number }, view: DOMRect) => {
       if (linkThread.current || !flow || !board) return;
-      const c = { x: (view.width / 2 - v.x) / v.zoom, y: (view.height / 2 - v.y) / v.zoom };
+      const insets = fitInsets(view);
+      const c = {
+        x: (insets.left + (view.width - insets.left - insets.right) / 2 - v.x) / v.zoom,
+        y: (insets.top + (view.height - insets.top - insets.bottom) / 2 - v.y) / v.zoom,
+      };
       const hit = flow.screens.find((s) => {
         const b = board.layout.screens[s.id];
         return b && c.x >= b.x && c.x <= b.x + b.w && c.y >= b.y - LABEL_H && c.y <= b.y + b.h && b.w * b.h * v.zoom * v.zoom >= MOTION_MIN_AREA;
@@ -563,6 +627,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       if (e.key === "Escape") {
         setCommenting(false);
         setDraft(undefined);
+        setHeld(undefined);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -591,20 +656,43 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         const next = new Set(flow.lanes.map((l) => l.id).filter((l) => l !== id));
         setCollapsed(next);
         // Then show that lane whole, on the board as it is drawn with the others collapsed.
-        const shown = collapseLanes(flow, layout, next);
-        const lane = shown.layout.lanes.find((l) => l.id === id);
+        const bounds = laneBounds(flow, collapseLanes(flow, layout, next), id, p.laneX);
         const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
-        if (!lane || !canvas) return;
-        const right = Math.max(
-          p.laneX + 480,
-          ...flow.screens.filter((s) => s.lane === id && shown.layout.screens[s.id]).map((s) => shown.layout.screens[s.id].x + shown.layout.screens[s.id].w + 24),
-        );
-        const bounds = { x: p.laneX, y: lane.y - LANE_TITLE_OVERHANG, width: right - p.laneX, height: lane.height + LANE_TITLE_OVERHANG };
+        if (!bounds || !canvas) return;
         void rf.setViewport(fitViewport(bounds, canvas, fitInsets(canvas)), { duration: 250 });
       },
       hoverScreen: setHovered,
+      pointScreen: (id) => {
+        // While the view moves, screens slide under a still pointer: their lines wait until it stops (onViewMove).
+        if (performance.now() - motion.current.at < POINT_SETTLE_MS) return;
+        window.clearTimeout(pointTimer.current);
+        // A moment's wait, so sweeping the pointer across screens does not flash each one's lines.
+        pointTimer.current = window.setTimeout(() => setPointed(id), id ? 60 : 120);
+      },
+      holdScreen: (id) => setHeld((h) => (h === id ? undefined : id)),
+      goToScreen: (id) => {
+        linkThread.current = undefined;
+        writeLink({ screen: id });
+        focusScreenNow.current(id);
+        setHeld(undefined);
+        setArrived(id);
+        window.clearTimeout(arrivedTimer.current);
+        arrivedTimer.current = window.setTimeout(() => setArrived(undefined), 1600);
+      },
     }),
-    [flow, layout, setCollapsed, rf],
+    [flow, layout, setCollapsed, rf, writeLink],
+  );
+  /** Show one lane whole, opening it if it is collapsed. */
+  const goToLane = useCallback(
+    (id: string) => {
+      if (!flow || !plan) return;
+      const shown = plan.board.collapsed.has(id) ? (expandLanes([id]) ?? plan.board) : plan.board;
+      const bounds = laneBounds(flow, shown, id, plan.laneX);
+      const canvas = document.querySelector(".react-flow")?.getBoundingClientRect();
+      if (!bounds || !canvas) return;
+      void rf.setViewport(fitViewport(bounds, canvas, fitInsets(canvas), 1), { duration: 250 });
+    },
+    [flow, plan, expandLanes, rf],
   );
   const collapseAll = useCallback(() => {
     if (!flow) return;
@@ -620,7 +708,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     (e: React.MouseEvent) => {
       if (!commenting || !layout || !board) return;
       const target = e.target as HTMLElement;
-      if (target.closest("[data-pin], [data-draft], [data-comment-panel], [data-toolbar], [data-lane-toggle], .react-flow__panel")) return;
+      if (target.closest("[data-pin], [data-draft], [data-comment-panel], [data-toolbar], [data-lane-toggle], [data-lanes-panel], [data-df-chip], .react-flow__panel")) return;
       const point: Point = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
       // Made on the board as drawn; kept with its point on the full board, which collapsing lanes does not move.
       const drawn = anchorFromTarget(target, { x: Math.round(point.x), y: Math.round(point.y) }, board.layout.screens);
@@ -635,17 +723,31 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
   const mark = useMemo(() => (draft && state?.flow ? markOf(draft.anchor, state.flow) : {}), [draft, state?.flow]);
   useEffect(() => {
     highlightInFrame(mark.selector ? mark.screen : undefined, mark.selector);
+  }, [mark]);
+  // Ring what the comment is on; while a screen is in focus, the screens its edges do not join fall back.
+  useEffect(() => {
     setNodes((ns) =>
       ns.map((n) => {
-        const on = (n.type === "screen" && !mark.selector && n.id === mark.screen) || (n.type === "lane" && n.id === `lane:${mark.lane}`);
-        return n.className === (on ? "df-marked" : undefined) ? n : { ...n, className: on ? "df-marked" : undefined };
+        const marked = (n.type === "screen" && !mark.selector && n.id === mark.screen) || (n.type === "lane" && n.id === `lane:${mark.lane}`);
+        const faded = !!near && n.type === "screen" && !near.has(n.id);
+        const className = [marked && "df-marked", faded && "df-faded", n.id === arrived && "df-arrived"].filter(Boolean).join(" ") || undefined;
+        return n.className === className ? n : { ...n, className };
       }),
     );
-  }, [mark, nodes.length, graph, setNodes]);
-  const edges = useMemo(
-    () => graph?.edges.map((e) => (e.id === mark.edge ? { ...e, data: { ...e.data!, marked: true } } : e)),
-    [graph, mark.edge],
-  );
+  }, [mark, near, arrived, nodes.length, graph, setNodes]);
+  /** The lines inside lanes; while a screen is in focus, its links to other lanes as well, and the rest fall back. */
+  const edges = useMemo(() => {
+    if (!graph || !plan || !flow) return undefined;
+    const lines = graph.edges.map((e) => {
+      const marked = e.id === mark.edge;
+      const touches = !!focus && (e.source === focus || e.target === focus);
+      const faded = !!focus && !touches;
+      if (!marked && !touches && !faded) return e;
+      return { ...e, data: { ...e.data!, ...(marked ? { marked } : {}), ...(touches ? { focus: true } : {}), ...(faded ? { faded } : {}) } };
+    });
+    if (!focus || !linkRoutes) return lines;
+    return [...lines, ...focusEdges(flow, plan, linkRoutes, focus).map((e) => ({ ...e, data: { ...e.data!, focus: true } }))];
+  }, [graph, plan, flow, mark.edge, focus, linkRoutes]);
 
   // What decides which screens are live frames (FrameGate).
   const boxes = useMemo(
@@ -717,12 +819,18 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         <IconButton label={t.back} size="sm" onClick={() => (location.href = "/")}>
           <ArrowLeft size={16} />
         </IconButton>
+        {flow && flow.lanes.length > 1 && (
+          <Tooltip content={lanesOpen ? t.hideLanes : t.showLanes} side="bottom">
+            <IconButton label={lanesOpen ? t.hideLanes : t.showLanes} size="sm" variant="ghost" aria-pressed={lanesOpen} onClick={() => setLanesOpen(!lanesOpen)}>
+              <PanelLeft size={16} />
+            </IconButton>
+          </Tooltip>
+        )}
         <div className="min-w-0 shrink">
           <h1 className="truncate font-display text-[22px] leading-tight">{flow?.title ?? feature}</h1>
           {flow?.subtitle && <p className="truncate text-[13px] text-muted-foreground">{flow.subtitle}</p>}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {flow && <Legend flow={flow} />}
           {flow && (
             <Tooltip content={`${t.searchScreens} (${MOD}K)`} side="bottom">
               <IconButton label={t.searchScreens} size="sm" variant="ghost" onClick={() => setSearchOpen(true)}>
@@ -770,7 +878,17 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
           </ul>
         </div>
       )}
-      <main className="relative flex-1" data-commenting={commenting} onClickCapture={onCanvasClick}>
+      <main
+        className="relative flex-1"
+        data-commenting={commenting}
+        onClickCapture={onCanvasClick}
+        onPointerMove={(e) => {
+          pointer.current = { x: e.clientX, y: e.clientY };
+        }}
+        onPointerLeave={() => {
+          pointer.current = undefined;
+        }}
+      >
         {graph && flow && layout && (
           <CanvasActions.Provider value={actions}>
           <ReactFlow
@@ -791,10 +909,12 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
             panOnScroll
             zoomActivationKeyCode={null}
             deleteKeyCode={null}
+            onPaneClick={() => setHeld(undefined)}
           >
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} />
             <ChromeScale />
             <FrameGate boxes={boxes} pictures={pictures} allLive={!drawsPictures} force={force} paused={playing} onLive={setLive} onSettle={onSettle} />
+            <MotionWatch onMove={onViewMove} />
             <Pins
               state={state}
               points={pinPoints}
@@ -824,6 +944,20 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
             )}
           </ReactFlow>
           </CanvasActions.Provider>
+        )}
+        {flow && board && lanesOpen && flow.lanes.length > 1 && (
+          <LanesPanel
+            flow={flow}
+            board={board}
+            comments={laneComments}
+            bottom={minimap ? 180 : 16}
+            onGo={goToLane}
+            onToggle={actions.toggleLane}
+            onOnly={actions.onlyLane}
+            onCollapseAll={collapseAll}
+            onExpandAll={expandAll}
+            onClose={() => setLanesOpen(false)}
+          />
         )}
         {draft && flow && (
           <DraftAt point={draftPoint ?? draft.anchor.point}>
@@ -920,7 +1054,7 @@ function FrameGate({
   force: ReadonlySet<string>;
   paused: boolean;
   onLive: (live: ReadonlySet<string>) => void;
-  onSettle?: (v: { x: number; y: number; zoom: number }, view: { width: number; height: number }) => void;
+  onSettle?: (v: { x: number; y: number; zoom: number }, view: DOMRect) => void;
 }) {
   const transform = useViewportStore((s) => s.transform);
   const root = useOptionsStore((s) => s.domNode);
@@ -967,7 +1101,31 @@ function FrameGate({
   return null;
 }
 
+/** Tells the canvas each time the view moves; a child of ReactFlow, so only it renders on every frame of a pan. */
+function MotionWatch({ onMove }: { onMove: () => void }) {
+  const transform = useViewportStore((s) => s.transform);
+  useEffect(() => {
+    onMove();
+  }, [transform, onMove]);
+  return null;
+}
+
+/** How long the view must stay still before the screen under the pointer shows its lines. */
+const POINT_SETTLE_MS = 150;
+
 const MINIMAP_KEY = "design-flow:minimap";
+const LANES_PANEL_KEY = "design-flow:lanes-panel";
+
+/** A lane's box with its title, as drawn on `board`: from the lanes' left edge to past its last screen. */
+function laneBounds(flow: Flow, board: Board, id: string, laneX: number) {
+  const lane = board.layout.lanes.find((l) => l.id === id);
+  if (!lane) return undefined;
+  const right = Math.max(
+    laneX + 480,
+    ...flow.screens.filter((s) => s.lane === id && board.layout.screens[s.id]).map((s) => board.layout.screens[s.id].x + board.layout.screens[s.id].w + 24),
+  );
+  return { x: laneX, y: lane.y - LANE_TITLE_OVERHANG, width: right - laneX, height: lane.height + LANE_TITLE_OVERHANG };
+}
 
 /** Screens in the minimap as grey frames; lanes as faint bands of their tone. */
 function miniMapColor(n: Node): string {
@@ -1047,14 +1205,15 @@ function visualBounds(nodes: Node[]) {
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
-/** What the floating toolbar and an open comment panel cover, plus a margin, on each side of the canvas. */
+/** What the floating toolbar, the lanes panel and an open comment panel cover, plus a margin, on each side of the canvas. */
 function fitInsets(canvas: DOMRect): Insets {
   const margin = 24;
   const bar = document.querySelector("[data-toolbar]")?.getBoundingClientRect();
   const panel = document.querySelector("[data-comment-panel]")?.getBoundingClientRect();
+  const lanes = document.querySelector("[data-lanes-panel]")?.getBoundingClientRect();
   return {
     top: margin,
-    left: margin,
+    left: lanes ? Math.max(margin, lanes.right - canvas.left + 16) : margin,
     bottom: bar ? Math.max(margin, canvas.bottom - bar.top + 16) : margin,
     right: panel ? Math.max(margin, canvas.right - panel.left + 16) : margin,
   };

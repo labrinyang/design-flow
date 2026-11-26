@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { parseFlow, type Flow } from "../src/core/flow.ts";
 import { layoutFlow } from "../src/core/layout.ts";
 import { boardEdges, collapseLanes, COLLAPSED_LANE_H, commentsByLane, drawnPoint, fullPoint } from "../web/src/lanes.ts";
-import { planBoard, toReactFlow } from "../web/src/model.ts";
+import { focusEdges, planBoard, toReactFlow } from "../web/src/model.ts";
+import { routeEdges } from "../web/src/route.ts";
 
 const flow = parseFlow(
   `version: 1
@@ -43,11 +44,10 @@ describe("collapsing lanes", async () => {
     expect(board.layout.height).toBe(layout.height - saved);
   });
 
-  it("brings an entry screen beside a collapsed lane up to its row", () => {
+  it("keeps the entry row where it is when lanes collapse", () => {
     const all = collapseLanes(flow, layout, new Set(["a", "b", "c"]));
-    const h = layout.screens.H;
-    const inLane = layout.lanes.find((l) => h.y >= l.y && h.y < l.y + l.height)!;
-    expect(all.layout.screens.H.y).toBe(all.layout.lanes.find((l) => l.id === inLane.id)!.y);
+    expect(all.layout.screens.H).toEqual(layout.screens.H);
+    expect(all.layout.lanes[0].y).toBe(layout.lanes[0].y);
   });
 
   it("maps points both ways, and points inside the collapsed lane onto its row", () => {
@@ -70,6 +70,9 @@ describe("collapsing lanes", async () => {
     expect(drawn).toEqual({ x: c1.x + 10, y: c1.y + 20 - saved });
     expect(fullPoint({ ...onC1, point: drawn }, layout, board)).toEqual(onC1.point);
     expect(drawnPoint({ type: "screen", screen: "B1", point: { x: 0, y: 0 } }, layout, board)).toBeUndefined();
+    // A point from an earlier layout, far from where the screen is now, stays on the screen.
+    const stale = drawnPoint({ type: "screen", screen: "C1", point: { x: c1.x + 20000, y: c1.y + 30 } }, layout, board)!;
+    expect(stale).toEqual({ x: c1.x + c1.w, y: c1.y + 30 - saved });
     expect(drawnPoint({ type: "lane", lane: "b", point: { x: 300, y: lane("b").y + 30 } }, layout, board)).toBeUndefined();
     expect(drawnPoint({ type: "canvas", point: { x: 300, y: lane("b").y + 100 } }, layout, board)).toBeUndefined();
   });
@@ -82,10 +85,15 @@ describe("collapsing lanes", async () => {
       ["lane:b", "C1", 2],
       ["C1", "H", 1],
     ]);
-    const { edges, nodes } = toReactFlow(flow, layout, { collapsed: new Set(["b"]), laneSummary: (n) => `${n} screens` });
-    expect(edges.find((e) => e.source === "lane:b")).toMatchObject({ target: "C1", data: { label: "×2", folded: true } });
-    expect(edges.find((e) => e.target === "lane:b")!.data).toMatchObject({ label: "Pay", folded: true });
-    expect(edges.every((e) => e.data?.route)).toBe(true);
+    const { edges, nodes, plan } = toReactFlow(flow, layout, { collapsed: new Set(["b"]), laneSummary: (n) => `${n} screens` });
+    // The one line inside the collapsed lane goes with it; links into and out of it end on its row, for the screen in focus.
+    expect(edges).toEqual([]);
+    const routes = routeEdges(plan.linksInput);
+    const atC1 = focusEdges(flow, plan, routes, "C1");
+    const atA1 = focusEdges(flow, plan, routes, "A1");
+    expect(atC1.find((e) => e.source === "lane:b")).toMatchObject({ target: "C1", data: { label: "×2", folded: true } });
+    expect(atA1.find((e) => e.target === "lane:b")!.data).toMatchObject({ label: "Pay", folded: true });
+    expect([...atC1, ...atA1].every((e) => e.data?.route)).toBe(true);
     expect(nodes.map((n) => n.id)).not.toContain("B1");
     expect(nodes.find((n) => n.id === "lane:b")!.data).toMatchObject({ collapsed: { screens: 2, comments: 0 } });
   });

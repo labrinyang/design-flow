@@ -25,6 +25,9 @@ export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePos
   const labelY = routed && route.label ? route.label.y : stepY;
   const tone = data?.tone ?? "neutral";
   const color = `var(--edge-${tone})`;
+  // While a screen is in focus, its lines stand out and the others fall back (canvas.tsx).
+  const faded = !!data?.faded;
+  const opacity = faded ? 0.1 : data?.focus ? 0.95 : 0.6;
   const marker = `arrow-${id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
   // Hovering the line or its label lights the line itself (shown only while commenting, see index.css).
   const [hover, setHover] = useState(false);
@@ -37,7 +40,7 @@ export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePos
       {/* Per-edge marker inside the edge's own SVG so PNG export (which clones the viewport) keeps arrowheads. */}
       <defs>
         <marker id={marker} markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-          <path d="M0,1 L8,5 L0,9" fill="none" stroke={color} strokeWidth="1.6" />
+          <path d="M0,1 L8,5 L0,9" fill="none" stroke={color} strokeWidth="1.6" strokeOpacity={faded ? 0.15 : 1} />
         </marker>
       </defs>
       <BaseEdge
@@ -47,7 +50,13 @@ export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePos
         className="df-edge"
         data-hover={hover}
         data-marked={!!data?.marked}
-        style={{ stroke: color, strokeWidth: 2.2, strokeOpacity: 0.6, strokeDasharray: data?.dashed ? "6 5" : undefined }}
+        style={{
+          stroke: color,
+          strokeWidth: data?.focus ? 2.6 : 2.2,
+          strokeOpacity: opacity,
+          strokeDasharray: data?.dashed ? "6 5" : undefined,
+          transition: "stroke-opacity 120ms ease",
+        }}
         interactionWidth={18}
       />
       <path
@@ -78,6 +87,9 @@ export function FlowEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePos
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               color,
               background: "var(--canvas)",
+              opacity: faded ? 0 : 1,
+              pointerEvents: faded ? "none" : undefined,
+              transition: "opacity 120ms ease",
             }}
           >
             {data.label}

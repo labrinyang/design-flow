@@ -118,7 +118,7 @@ lanes: # rows, top to bottom
     note: One line shown at the bottom of the lane
 screens:
   - id: H00 # unique; shown as the screen's number
-    title: Home # no lane: the entry column on the far left
+    title: Home # no lane: the entry row above the lanes
     html: |
       <h1>Welcome</h1>
       <button class="btn pay" data-id="charge">Charge</button>
@@ -147,7 +147,7 @@ Screen HTML rules:
 - Put `data-id="…"` on the elements people will talk about (buttons, fields, list items). Comments on them are anchored by that id, so they survive edits; without it they anchor by position.
 - A comment on an element arrives as `Screen P02 Choose payment · button "Bank card" ([data-id="card"])`.
 
-Layout is automatic: lanes are rows, the flow runs left to right, branches of one step stack in one column. Never compute coordinates.
+Layout is automatic: lanes are rows, and each lane runs left to right from its own start, branches of one step stacked in one column (more than three go on in the next). Edges between lanes show as links on their screens instead of long lines, so draw every edge the flow needs. Never compute coordinates.
 
 ## Commands
 

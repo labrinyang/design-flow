@@ -95,6 +95,18 @@ export function fitViewport(
 }
 
 /**
+ * The first view of a board: the whole board when it fits about as large as at the window's width; else the top of
+ * the board at the window's width (never past 100%), so a tall board opens readable instead of tiny.
+ */
+export function openViewport(bounds: { x: number; y: number; width: number; height: number }, canvas: { width: number; height: number }, insets: Insets): Viewport {
+  const fit = fitViewport(bounds, canvas, insets);
+  const w = Math.max(1, canvas.width - insets.left - insets.right);
+  const zoom = Math.min(1, w / Math.max(1, bounds.width));
+  if (zoom <= fit.zoom * 1.25) return fit;
+  return { x: insets.left + (w - bounds.width * zoom) / 2 - bounds.x * zoom, y: insets.top - bounds.y * zoom, zoom };
+}
+
+/**
  * The zoom that shows one frame (with its label) comfortably: most of the canvas's height and no more than
  * most of its width, and never past the screen's real size.
  */

@@ -102,6 +102,18 @@ const en = {
   disconnected: "Disconnected from the design-flow server. Reconnecting…",
   back: "All features",
   more: (n: number) => `+${n}`,
+  lanes: "Lanes",
+  showLanes: "Show lanes",
+  hideLanes: "Hide lanes",
+  goToLane: (title: string) => `Go to ${title}`,
+  linkOut: (id: string, title: string, label?: string) => `Goes to ${id} ${title}${label ? ` (${label})` : ""}`,
+  linkIn: (id: string, title: string, label?: string) => `Comes from ${id} ${title}${label ? ` (${label})` : ""}`,
+  linksOut: (n: number) => `Goes to ${n} screens in other lanes`,
+  linksIn: (n: number) => `Comes from ${n} screens in other lanes`,
+  keyNext: "Next step",
+  keyBack: "Way back",
+  keyError: "Error",
+  keyLink: "To another lane",
 };
 
 const zh: typeof en = {
@@ -196,6 +208,18 @@ const zh: typeof en = {
   disconnected: "与 design-flow 服务断开，正在重连…",
   back: "全部功能",
   more: (n) => `+${n}`,
+  lanes: "泳道",
+  showLanes: "显示泳道列表",
+  hideLanes: "隐藏泳道列表",
+  goToLane: (title) => `前往${title}`,
+  linkOut: (id, title, label) => `去 ${id} ${title}${label ? `（${label}）` : ""}`,
+  linkIn: (id, title, label) => `来自 ${id} ${title}${label ? `（${label}）` : ""}`,
+  linksOut: (n) => `去其他泳道的 ${n} 个帧`,
+  linksIn: (n) => `来自其他泳道的 ${n} 个帧`,
+  keyNext: "下一步",
+  keyBack: "返回",
+  keyError: "出错",
+  keyLink: "去别的泳道",
 };
 
 export const t = locale === "zh" ? zh : en;

@@ -84,6 +84,8 @@ export function collapseLanes(flow: Flow, layout: Layout, collapsed: ReadonlySet
   };
 }
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
 /** Where an anchor's point (on the full board) is drawn; undefined when it is inside a collapsed lane. */
 export function drawnPoint(a: Anchor, full: Layout, board: Board): Point | undefined {
   if (a.type === "element" || a.type === "screen") {
@@ -91,7 +93,12 @@ export function drawnPoint(a: Anchor, full: Layout, board: Board): Point | undef
     // On its screen: moved with the screen, wherever the screen's lane is.
     const from = full.screens[a.screen];
     const to = board.layout.screens[a.screen];
-    if (from && to) return { x: a.point.x - from.x + to.x, y: a.point.y - from.y + to.y };
+    // A point kept from an earlier layout can be far from where the screen is now: it stays on the screen, its label or note.
+    if (from && to)
+      return {
+        x: clamp(a.point.x - from.x + to.x, to.x, to.x + to.w),
+        y: clamp(a.point.y - from.y + to.y, to.y - LABEL_H, to.y + to.h + NOTE_H),
+      };
   }
   if (a.type === "lane" ? board.collapsed.has(a.lane) : board.collapsedAt(a.point)) return undefined;
   return board.toView(a.point);

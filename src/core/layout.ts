@@ -28,6 +28,11 @@ const LANE_GAP = 56;
 const ORIGIN_X = 40;
 const ORIGIN_Y = 40;
 const EMPTY_LANE_H = 160;
+/** Where lanes start on the left; their screens, and the entry row above them, start LANE_INSET further in. */
+export const LANE_X = ORIGIN_X;
+const LANE_INSET = 110;
+/** A step with more screens than this in one lane goes on in the next column, so no lane grows very tall. */
+export const MAX_STACK = 3;
 const slotH = (h: number) => LABEL_H + h + NOTE_H;
 
 export interface ScreenBox {
@@ -58,10 +63,11 @@ const elk = new ELK();
 
 /**
  * Edges that move the flow forward: `back` edges, edges into a lane-less entry
- * screen, and edges that close a cycle (found by DFS from the entries, in
- * declaration order) are dropped so ELK never reverses the main path.
+ * screen, and edges that close a cycle (found by DFS from the entries, then from
+ * `entered`, the screens the flow comes into from elsewhere, in declaration
+ * order) are dropped so ELK never reverses the main path.
  */
-export function forwardEdges(flow: Flow, ids: string[]) {
+export function forwardEdges(flow: Flow, ids: string[], entered: ReadonlySet<string> = new Set()) {
   const inSet = new Set(ids);
   const entries = new Set(flow.screens.filter((s) => !s.lane).map((s) => s.id));
   const candidates = flow.edges.filter(
@@ -82,13 +88,17 @@ export function forwardEdges(flow: Flow, ids: string[]) {
     state.set(id, 2);
   };
   const hasIncoming = new Set(candidates.map((e) => e.to));
-  const roots = [...ids.filter((id) => entries.has(id)), ...ids.filter((id) => !hasIncoming.has(id)), ...ids];
+  const roots = [...ids.filter((id) => entries.has(id)), ...ids.filter((id) => entered.has(id)), ...ids.filter((id) => !hasIncoming.has(id)), ...ids];
   for (const r of roots) if (!state.has(r)) visit(r);
   return candidates.filter((e) => keep.has(e));
 }
 
-/** Column (layer) and in-layer order for every screen that takes part in layering. */
-async function rank(flow: Flow, ids: string[]): Promise<Map<string, { col: number; order: number }>> {
+/**
+ * Column (layer) and in-layer order for one lane's screens, from the lane's own forward edges. One graph, so the
+ * screens of one step share a layer even where parts of the lane do not connect; a layer's frames overlap in x
+ * whatever their widths, so each run of overlapping frames is one column.
+ */
+async function rank(flow: Flow, ids: string[], entered: ReadonlySet<string>): Promise<Map<string, { col: number; order: number }>> {
   const graph: ElkNode = {
     id: "root",
     layoutOptions: {
@@ -97,103 +107,98 @@ async function rank(flow: Flow, ids: string[]): Promise<Map<string, { col: numbe
       "elk.layered.spacing.nodeNodeBetweenLayers": "40",
       "elk.spacing.nodeNode": "20",
       "elk.layered.crossingMinimization.semiInteractive": "true",
+      "elk.separateConnectedComponents": "false",
     },
-    children: ids.map((id, i) => ({
-      id,
-      width: frameSize(flow, flow.screens.find((s) => s.id === id)!).width,
-      height: slotH(frameSize(flow, flow.screens.find((s) => s.id === id)!).height),
-      layoutOptions: { "elk.position": `(0,${i})` },
-    })),
-    edges: forwardEdges(flow, ids).map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] })),
+    children: ids.map((id, i) => {
+      const size = frameSize(flow, flow.screens.find((s) => s.id === id)!);
+      return { id, width: size.width, height: slotH(size.height), layoutOptions: { "elk.position": `(0,${i})` } };
+    }),
+    edges: forwardEdges(flow, ids, entered).map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] })),
   };
   const out = await elk.layout(graph);
-  const xs = [...new Set((out.children ?? []).map((c) => Math.round(c.x ?? 0)))].sort((a: number, b: number) => a - b);
   const res = new Map<string, { col: number; order: number }>();
-  for (const c of out.children ?? []) res.set(c.id, { col: xs.indexOf(Math.round(c.x ?? 0)), order: c.y ?? 0 });
+  let col = -1;
+  let right = -Infinity;
+  for (const c of [...(out.children ?? [])].sort((a, b) => (a.x ?? 0) - (b.x ?? 0))) {
+    const x = c.x ?? 0;
+    if (x >= right) {
+      col++;
+      right = x + (c.width ?? 0);
+    } else right = Math.max(right, x + (c.width ?? 0));
+    res.set(c.id, { col, order: c.y ?? 0 });
+  }
   return res;
 }
 
+/**
+ * Screens without a lane sit in a row above the lanes. Each lane is laid out on its own, from its start on the
+ * left: its screens follow its own edges left to right, branches of one step stack in one column (up to
+ * MAX_STACK, then the next column), and an `enter: any` lane tiles its screens in order. Edges between lanes do
+ * not shape the layout; the canvas shows them as links on their screens.
+ */
 export async function layoutFlow(flow: Flow, overrides: Overrides = {}): Promise<Layout> {
-  const tiled = new Set(flow.lanes.filter((l) => l.enter === "any").map((l) => l.id));
-  const ranked = flow.screens.filter((s) => !s.lane || !tiled.has(s.lane)).map((s) => s.id);
-  const ranks = ranked.length ? await rank(flow, ranked) : new Map();
-
-  // Lane-less screens always sit in column 0; everything ELK put in column 0 alongside them stays there.
-  const col = new Map<string, number>();
-  const order = new Map<string, number>();
-  const shift = flow.screens.some((s) => !s.lane && (ranks.get(s.id)?.col ?? 0) > 0) ? 1 : 0;
-  for (const s of flow.screens) {
-    const r = ranks.get(s.id);
-    if (r) {
-      col.set(s.id, s.lane ? Math.max(r.col + shift, flow.screens.some((t) => !t.lane) ? 1 : 0) : 0);
-      order.set(s.id, r.order);
-    }
-  }
-  for (const lane of flow.lanes.filter((l) => tiled.has(l.id)))
-    flow.screens.filter((s) => s.lane === lane.id).forEach((s, i) => {
-      col.set(s.id, i + 1);
-      order.set(s.id, 0);
-    });
-
   const size = new Map(flow.screens.map((sc) => [sc.id, frameSize(flow, sc)]));
-  const entries = flow.screens.filter((sc) => !sc.lane);
-  // Column x positions: each column is as wide as its widest frame.
-  const maxCol = Math.max(0, ...[...col.values()]);
-  const colW: number[] = Array.from({ length: maxCol + 1 }, () => FRAME_W);
-  for (const sc of flow.screens) {
-    const c = sc.lane ? (col.get(sc.id) ?? 0) : 0;
-    colW[c] = Math.max(colW[c], size.get(sc.id)!.width);
-  }
-  const colX: number[] = [];
-  let cx = ORIGIN_X;
-  for (let c = 0; c <= maxCol; c++) {
-    colX[c] = cx;
-    cx += colW[c] + COL_GAP;
-  }
+  const laneOf = new Map(flow.screens.map((sc) => [sc.id, sc.lane]));
   const stackHeight = (ids: string[]) => ids.reduce((h, id) => h + slotH(size.get(id)!.height), 0) + Math.max(0, ids.length - 1) * STACK_GAP;
-
+  const x0 = LANE_X + LANE_INSET;
   const screens: Record<string, ScreenBox> = {};
-  const lanes: LaneBox[] = [];
   let y = ORIGIN_Y;
+
+  const entries = flow.screens.filter((sc) => !sc.lane);
+  if (entries.length) {
+    let x = x0;
+    entries.forEach((sc, i) => {
+      const { width: w, height: h } = size.get(sc.id)!;
+      screens[sc.id] = { x, y: y + LABEL_H, w, h, col: i, pinned: false };
+      x += w + COL_GAP;
+    });
+    y += slotH(Math.max(...entries.map((sc) => size.get(sc.id)!.height))) + LANE_GAP;
+  }
+
+  const lanes: LaneBox[] = [];
   for (const lane of flow.lanes) {
-    const members = flow.screens.filter((sc) => sc.lane === lane.id);
-    const byCol = new Map<number, string[]>();
-    for (const sc of members) {
-      const c = col.get(sc.id) ?? 0;
-      byCol.set(c, [...(byCol.get(c) ?? []), sc.id]);
+    const ids = flow.screens.filter((sc) => sc.lane === lane.id).map((sc) => sc.id);
+    let cols: string[][];
+    if (lane.enter === "any") cols = ids.map((id) => [id]);
+    else {
+      // Where the flow comes into the lane from elsewhere: a cycle inside the lane is read from there.
+      const entered = new Set(flow.edges.filter((e) => e.kind !== "back" && laneOf.get(e.from) !== lane.id && laneOf.get(e.to) === lane.id).map((e) => e.to));
+      const ranks = ids.length ? await rank(flow, ids, entered) : new Map<string, { col: number; order: number }>();
+      const byCol = new Map<number, string[]>();
+      for (const id of ids) {
+        const c = ranks.get(id)!.col;
+        byCol.set(c, [...(byCol.get(c) ?? []), id]);
+      }
+      cols = [...byCol.keys()]
+        .sort((a, b) => a - b)
+        .flatMap((c) => {
+          const step = byCol.get(c)!.sort((a, b) => ranks.get(a)!.order - ranks.get(b)!.order);
+          const out: string[][] = [];
+          for (let i = 0; i < step.length; i += MAX_STACK) out.push(step.slice(i, i + MAX_STACK));
+          return out;
+        });
     }
-    const inner = byCol.size ? Math.max(...[...byCol.values()].map(stackHeight)) : EMPTY_LANE_H;
-    const height = inner + 2 * LANE_PAD;
-    for (const [c, ids] of byCol) {
-      ids.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+    const inner = cols.length ? Math.max(...cols.map(stackHeight)) : EMPTY_LANE_H;
+    let x = x0;
+    cols.forEach((ids, c) => {
       let sy = y + LANE_PAD + (inner - stackHeight(ids)) / 2;
       for (const id of ids) {
         const { width: w, height: h } = size.get(id)!;
-        screens[id] = { x: colX[c], y: sy + LABEL_H, w, h, col: c, pinned: false };
+        screens[id] = { x, y: sy + LABEL_H, w, h, col: c, pinned: false };
         sy += slotH(h) + STACK_GAP;
       }
-    }
-    lanes.push({ id: lane.id, y, height });
-    y += height + LANE_GAP;
-  }
-
-  const top = lanes.length ? lanes[0].y : ORIGIN_Y;
-  const bottom = lanes.length ? lanes.at(-1)!.y + lanes.at(-1)!.height : ORIGIN_Y + stackHeight(entries.map((e) => e.id));
-  // Centre the frames themselves (not their label/note slots) across the lanes.
-  const framesH = entries.reduce((h, e) => h + size.get(e.id)!.height, 0) + Math.max(0, entries.length - 1) * (LABEL_H + NOTE_H + STACK_GAP);
-  let ey = (top + bottom) / 2 - framesH / 2 - LABEL_H;
-  // ey is the top of the first entry's slot; its frame starts LABEL_H lower.
-  for (const sc of entries) {
-    const { width: w, height: h } = size.get(sc.id)!;
-    screens[sc.id] = { x: ORIGIN_X, y: ey + LABEL_H, w, h, col: 0, pinned: false };
-    ey += slotH(h) + STACK_GAP;
+      x += Math.max(FRAME_W, ...ids.map((id) => size.get(id)!.width)) + COL_GAP;
+    });
+    lanes.push({ id: lane.id, y, height: inner + 2 * LANE_PAD });
+    y += inner + 2 * LANE_PAD + LANE_GAP;
   }
 
   for (const [id, pos] of Object.entries(overrides))
     if (screens[id]) screens[id] = { ...screens[id], x: pos.x, y: pos.y, pinned: true };
 
   const boxes = Object.values(screens);
-  const width = Math.max(ORIGIN_X, ...boxes.map((b) => b.x + b.w)) + ORIGIN_X;
+  const bottom = lanes.length ? lanes.at(-1)!.y + lanes.at(-1)!.height : ORIGIN_Y;
+  const width = Math.max(x0 + FRAME_W, ...boxes.map((b) => b.x + b.w)) + ORIGIN_X;
   const height = Math.max(bottom, ...boxes.map((b) => b.y + b.h + NOTE_H)) + ORIGIN_Y;
   return { screens, lanes, width, height };
 }

@@ -61,12 +61,17 @@ body {
   cursor: crosshair;
 }
 /*
- * Nothing on the canvas is dragged or selected, so React Flow leaves screens and lines inert and the canvas pans from
- * anywhere over them; while commenting they take clicks again.
+ * Nothing on the canvas is dragged or selected, so the canvas pans from anywhere, screens included. Screens take the
+ * pointer all the same: hovering one shows its lines, a click holds them, and while commenting a click comments.
  */
-[data-commenting="true"] .react-flow__node-screen {
+.react-flow__node-screen {
   /* React Flow sets pointer-events on each node inline. */
   pointer-events: all !important;
+  transition: opacity 120ms ease;
+}
+/* Another screen is in focus, and this one is not at the other end of its lines. */
+.react-flow__node-screen.df-faded {
+  opacity: 0.22;
 }
 [data-commenting="true"] .react-flow__edge.inactive {
   pointer-events: visibleStroke;
@@ -137,8 +142,8 @@ body {
 }
 
 /*
- * Screen labels and lane titles keep a readable size when zoomed out (--df-label, --df-lane; see zoom.ts),
- * still as wide as their frame or lane. Far out, a label is one line, so it stays clear of the row above.
+ * Screen labels and lane titles keep a readable size when zoomed out (--df-label, --df-lane; see zoom.ts); a label
+ * still as wide as its frame. Far out, a label is one line, so it stays clear of the row above.
  */
 [data-df-label] {
   width: calc(var(--w) / var(--df-label, 1));
@@ -162,15 +167,48 @@ body {
   font-size: 12px;
   color: var(--muted-foreground);
 }
-/* A lane title grows only until it would reach the next lane's (--fit, model.ts); a collapsed lane's row too. */
+/* Far out a label is the id and title on one line; the link chips come back closer in, and lines show on hover. */
+.react-flow[data-compact] [data-df-label-top] {
+  display: contents;
+}
+.react-flow[data-compact] [data-df-chips] {
+  display: none;
+}
+/*
+ * A lane title grows only until it would reach the next lane's (--fit, model.ts); a collapsed lane's row too. It may
+ * run past the lane's right edge, into the empty canvas beside the board, so it stays whole when zoomed out.
+ */
 [data-df-lane-title] {
-  max-width: calc((var(--w) - 48px) / min(var(--df-lane, 1), var(--fit, 100)));
   transform: scale(min(var(--df-lane, 1), var(--fit, 100)));
-  transform-origin: 0 50%;
+  /* Up from the lane's top edge, away from the screens inside it. */
+  transform-origin: 0 100%;
 }
 [data-df-lane-row] {
   transform: scale(min(var(--df-lane, 1), var(--fit, 100)));
   transform-origin: 0 50%;
+}
+
+/* The screen a link took you to rings twice, then lets go. */
+@keyframes df-arrive {
+  0%,
+  45% {
+    outline-color: var(--foreground);
+  }
+  25%,
+  100% {
+    outline-color: transparent;
+  }
+}
+.df-arrived [data-frame] {
+  outline: calc(3px * var(--df-chrome, 1)) solid transparent;
+  outline-offset: calc(4px * var(--df-chrome, 1));
+  animation: df-arrive 1400ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .df-arrived [data-frame] {
+    animation: none;
+    outline-color: var(--foreground);
+  }
 }
 
 :root {

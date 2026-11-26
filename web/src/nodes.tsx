@@ -1,10 +1,10 @@
-import { Tooltip } from "@astrafoundry/design/ui";
+import { Menu, MenuItem, MenuPopup, MenuTrigger, Tooltip } from "@astrafoundry/design/ui";
 import { Handle, Position, useViewportStore, type NodeProps } from "@xyflow/react";
-import { ChevronDown, ChevronRight, Focus, MessageSquare } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Focus, MessageSquare } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Flow, Lane, Screen } from "../../src/core/flow.ts";
 import { t } from "./i18n.ts";
-import { LABEL_H, NOTE_H, type LaneNode, type ScreenNode } from "./model.ts";
+import { LABEL_H, NOTE_H, type LaneNode, type LinkEnd, type ScreenNode } from "./model.ts";
 import type { FrameElement } from "./anchor.ts";
 import { acceptFrameLocated, acceptFrameMessage, acceptFrameWheel, frameToClient, screenDocument, viewportOf, type FrameWheelData, type Located } from "./screen-doc.ts";
 import { FAR_FRAME_PX } from "./zoom.ts";
@@ -30,8 +30,21 @@ export interface CanvasActionHandlers {
   onlyLane(lane: string): void;
   /** The pointer came onto a screen while commenting, so it should be a live frame to click into. */
   hoverScreen(screen: string): void;
+  /** The pointer came onto a screen, or left it (no screen): the screen under it shows its lines. */
+  pointScreen(screen: string | undefined): void;
+  /** A click on a screen keeps its lines shown until a click elsewhere, or lets them go. */
+  holdScreen(screen: string): void;
+  /** Go to the screen at the other end of a link. */
+  goToScreen(screen: string): void;
 }
-export const CanvasActions = createContext<CanvasActionHandlers>({ toggleLane() {}, onlyLane() {}, hoverScreen() {} });
+export const CanvasActions = createContext<CanvasActionHandlers>({
+  toggleLane() {},
+  onlyLane() {},
+  hoverScreen() {},
+  pointScreen() {},
+  holdScreen() {},
+  goToScreen() {},
+});
 
 /** Reports from every frame go through one listener on the canvas: "comment" (a commenting click) and "located". */
 export const frameEvents = new EventTarget();
@@ -139,13 +152,21 @@ export function highlightInFrame(screen: string | undefined, selector: string | 
  * (live.ts). Far out, its label and note are left out.
  */
 export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
-  const { screen, tone, flow, commenting, live, thumb } = data;
+  const { screen, tone, flow, commenting, live, thumb, out, into } = data;
   const w = data.width;
   const h = data.height;
   const far = useViewportStore((s) => s.transform[2] * w < FAR_FRAME_PX);
   const actions = useContext(CanvasActions);
   return (
-    <div data-tone={tone} className="relative" style={{ width: w, height: h }}>
+    <div
+      data-tone={tone}
+      className="relative"
+      style={{ width: w, height: h }}
+      // Not while a button is held: the canvas is being dragged across the screen.
+      onPointerEnter={(e) => e.buttons === 0 && actions.pointScreen(screen.id)}
+      onPointerLeave={() => actions.pointScreen(undefined)}
+      onClick={commenting ? undefined : () => actions.holdScreen(screen.id)}
+    >
       <Handle id="in-left" type="target" position={Position.Left} />
       <Handle id="in-right" type="target" position={Position.Right} />
       <Handle id="out-right" type="source" position={Position.Right} />
@@ -158,9 +179,12 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
           className="absolute bottom-full left-0 flex flex-col justify-end pb-1.5 text-[14px] leading-tight"
           style={{ height: LABEL_H, "--w": `${w}px` } as CSSProperties}
         >
-          <span data-id className="shrink-0 text-[12px] font-medium tracking-wide tabular-nums" style={{ color: "var(--tone)" }}>
-            {screen.id}
-          </span>
+          <div data-df-label-top className="flex min-w-0 items-center gap-2">
+            <span data-id className="shrink-0 text-[12px] font-medium tracking-wide tabular-nums" style={{ color: "var(--tone)" }}>
+              {screen.id}
+            </span>
+            {(out.length > 0 || into.length > 0) && <LinkChips out={out} into={into} />}
+          </div>
           <span data-title className="min-w-0 truncate text-foreground">
             {screen.title}
           </span>
@@ -197,6 +221,77 @@ export function ScreenNodeView({ data }: NodeProps<ScreenNode>) {
         </div>
       )}
     </div>
+  );
+}
+
+const CHIP =
+  "nodrag nopan flex h-[18px] min-w-0 shrink-0 cursor-pointer items-center gap-1 rounded-full bg-card px-1.5 text-[11px] leading-none font-normal tracking-normal text-muted-foreground ring-1 ring-border hover:text-foreground hover:ring-foreground/40";
+
+/**
+ * Where a screen leads in other lanes and where it is reached from, on its label instead of long lines: one chip
+ * per screen it leads to (named when it is the only one), and a chip with a list for four or more, or for more
+ * than one screen it is reached from. A click goes there.
+ */
+function LinkChips({ out, into }: { out: LinkEnd[]; into: LinkEnd[] }) {
+  return (
+    <span data-df-chips className="ml-auto flex min-w-0 items-center gap-1">
+      {into.length === 1 && <LinkChip dir="in" end={into[0]} named={false} />}
+      {into.length > 1 && <LinkList dir="in" ends={into} />}
+      {out.length <= 3 && out.map((e) => <LinkChip key={e.id} dir="out" end={e} named={out.length === 1} />)}
+      {out.length > 3 && <LinkList dir="out" ends={out} />}
+    </span>
+  );
+}
+
+function LinkChip({ dir, end, named }: { dir: "in" | "out"; end: LinkEnd; named: boolean }) {
+  const actions = useContext(CanvasActions);
+  const tip = dir === "out" ? t.linkOut(end.id, end.title, end.label) : t.linkIn(end.id, end.title, end.label);
+  return (
+    <Tooltip content={tip} side="top">
+      <button
+        type="button"
+        data-df-chip
+        aria-label={tip}
+        className={CHIP}
+        style={{ pointerEvents: "auto" }}
+        onClick={(e) => {
+          e.stopPropagation();
+          actions.goToScreen(end.id);
+        }}
+      >
+        {dir === "in" ? <ArrowLeft size={11} className="shrink-0" /> : <ArrowRight size={11} className="shrink-0" />}
+        <span data-tone={end.tone} className="shrink-0 font-medium tabular-nums" style={{ color: "var(--tone)" }}>
+          {end.id}
+        </span>
+        {named && <span className="max-w-[160px] min-w-0 truncate">{end.title}</span>}
+      </button>
+    </Tooltip>
+  );
+}
+
+function LinkList({ dir, ends }: { dir: "in" | "out"; ends: LinkEnd[] }) {
+  const actions = useContext(CanvasActions);
+  const label = dir === "out" ? t.linksOut(ends.length) : t.linksIn(ends.length);
+  return (
+    <Menu>
+      <MenuTrigger
+        render={<button type="button" data-df-chip aria-label={label} title={label} className={CHIP} style={{ pointerEvents: "auto" }} onClick={(e) => e.stopPropagation()} />}
+      >
+        {dir === "in" ? <ArrowLeft size={11} className="shrink-0" /> : <ArrowRight size={11} className="shrink-0" />}
+        <span className="tabular-nums">{ends.length}</span>
+      </MenuTrigger>
+      <MenuPopup side="top" align="end" className="max-h-[min(420px,70vh)] overflow-y-auto">
+        {ends.map((e) => (
+          <MenuItem key={e.id} onClick={() => actions.goToScreen(e.id)}>
+            <span data-tone={e.tone} className="w-11 shrink-0 font-mono text-[12px] tabular-nums" style={{ color: "var(--tone)" }}>
+              {e.id}
+            </span>
+            <span className="min-w-0 truncate">{e.title}</span>
+            {e.label && <span className="ml-auto max-w-[180px] shrink-0 truncate pl-3 text-[12px] text-muted-foreground">{e.label}</span>}
+          </MenuItem>
+        ))}
+      </MenuPopup>
+    </Menu>
   );
 }
 
@@ -334,8 +429,8 @@ export function LaneNodeView({ data }: NodeProps<LaneNode>) {
     >
       <div
         data-df-lane-title
-        className="absolute -top-3.5 left-6 flex items-center gap-1.5 overflow-hidden px-2.5 text-[18px] font-medium whitespace-nowrap"
-        style={{ color: "var(--tone)", background: "var(--canvas)", "--w": `${width}px`, "--fit": String(fit) } as CSSProperties}
+        className="absolute bottom-[calc(100%-6px)] left-6 flex items-center gap-1.5 overflow-hidden px-2.5 text-[18px] font-medium whitespace-nowrap"
+        style={{ color: "var(--tone)", background: "var(--canvas)", "--fit": String(fit) } as CSSProperties}
       >
         <button
           type="button"

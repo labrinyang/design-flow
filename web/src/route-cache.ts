@@ -4,8 +4,8 @@ export type Routes = (Routed | undefined)[];
 
 const PREFIX = "design-flow:routes:";
 const INDEX = "design-flow:routes";
-/** Boards kept, the most recently used: one per layout and set of collapsed lanes. */
-const KEEP = 24;
+/** Routing problems kept, the most recently used: two per layout and set of collapsed lanes (lines, and links). */
+const KEEP = 40;
 
 /**
  * Bump when route.ts draws lines differently, so routes kept from before are not used. A new build changes the

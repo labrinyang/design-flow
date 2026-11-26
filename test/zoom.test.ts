@@ -1,7 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { parseFlow, type Flow } from "../src/core/flow.ts";
 import { layoutFlow } from "../src/core/layout.ts";
-import { actualSizeZoom, chromeScale, FIT_MAX_ZOOM, fitViewport, MAX_ZOOM, MIN_ZOOM, PIN_MIN_PX, PIN_PX, pinScale, wheelZoomStep, ZOOM_STEP, zoomAround } from "../web/src/zoom.ts";
+import { actualSizeZoom, chromeScale, FIT_MAX_ZOOM, fitViewport, MAX_ZOOM, MIN_ZOOM, openViewport, PIN_MIN_PX, PIN_PX, pinScale, wheelZoomStep, ZOOM_STEP, zoomAround } from "../web/src/zoom.ts";
+
+describe("openViewport", () => {
+  const canvas = { width: 1000, height: 800 };
+  const insets = { top: 20, right: 20, bottom: 20, left: 20 };
+  it("shows a board whole when it fits about as large as at the window's width", () => {
+    const b = { x: 0, y: 0, width: 2000, height: 1000 };
+    expect(openViewport(b, canvas, insets)).toEqual(fitViewport(b, canvas, insets));
+  });
+  it("opens a tall board at the window's width, from its top", () => {
+    const b = { x: 40, y: 40, width: 4800, height: 30000 };
+    const v = openViewport(b, canvas, insets);
+    expect(v.zoom).toBeCloseTo(960 / 4800);
+    expect(v.x).toBeCloseTo(20 - 40 * v.zoom);
+    expect(v.y).toBeCloseTo(20 - 40 * v.zoom);
+  });
+  it("never opens a narrow tall board past 100%", () => {
+    expect(openViewport({ x: 0, y: 0, width: 400, height: 30000 }, canvas, insets).zoom).toBe(1);
+  });
+});
 
 describe("zoom limits", () => {
   it("zooms in further than fit to window goes", () => {

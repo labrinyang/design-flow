@@ -1,6 +1,6 @@
 import type { Edge as RFEdge, Node as RFNode } from "@xyflow/react";
 import type { Badge, Edge, Flow, Lane, Screen, Tone } from "../../src/core/flow.ts";
-import { FRAME_H, FRAME_W, LABEL_H, LANE_PAD, NOTE_H, type Layout } from "../../src/core/layout.ts";
+import { FRAME_H, FRAME_W, LABEL_H, LANE_PAD, LANE_X, NOTE_H, type Layout } from "../../src/core/layout.ts";
 import { boardEdges, collapseLanes, laneNodeId, type Board, type BoardEdge } from "./lanes.ts";
 import { roundedPath, routeEdges, type Point, type Rect, type RouteInput, type RouteScreen, type Routed } from "./route.ts";
 
@@ -16,6 +16,17 @@ export interface ScreenData extends Record<string, unknown> {
   /** Set by the canvas: shown as a live frame; otherwise as its picture, or a blank card until that is drawn. */
   live: boolean;
   thumb?: string;
+  /** Screens in other lanes this screen leads to, and those that lead to it: links on the screen instead of lines. */
+  out: LinkEnd[];
+  into: LinkEnd[];
+}
+/** A screen at the other end of an edge between lanes. */
+export interface LinkEnd {
+  id: string;
+  title: string;
+  /** The first such edge's label: what the user does. */
+  label?: string;
+  tone: Tone;
 }
 export interface LaneData extends Record<string, unknown> {
   lane: Lane;
@@ -39,6 +50,12 @@ export interface EdgeData extends Record<string, unknown> {
   folded?: boolean;
   /** The routed line, if routing found one. */
   route?: EdgeRoute;
+  /** Runs between lanes, so it is drawn only for the screen in focus. */
+  link?: boolean;
+  /** Another screen is in focus and this line does not touch it. */
+  faded?: boolean;
+  /** Touches the screen in focus. */
+  focus?: boolean;
 }
 export interface EdgeRoute {
   /** SVG path of the line. */
@@ -52,9 +69,11 @@ export type LaneNode = RFNode<LaneData, "lane">;
 export type FlowNode = ScreenNode | LaneNode;
 export type FlowEdge = RFEdge<EdgeData, "flow">;
 
-export const LANE_X = 230;
-/** How far a lane's title rises above the lane's box (LaneNodeView places it at -top-3.5). */
-export const LANE_TITLE_OVERHANG = 16;
+/**
+ * How far a lane's title rises above the lane's box: LaneNodeView sits it on the box's top edge, 6px into the box,
+ * and it grows upward when zoomed out, clear of the first screens' labels below.
+ */
+export const LANE_TITLE_OVERHANG = 22;
 
 export function laneOf(flow: Flow, screenId: string): Lane | undefined {
   const s = flow.screens.find((x) => x.id === screenId);
@@ -98,24 +117,30 @@ const ROW_INSET = 24;
 /** Height of a lane's title, or of a collapsed lane's row, at 100%. */
 const TITLE_H = 40;
 
-/** What the board draws once lanes are collapsed, and the routing problem for its lines. */
+/**
+ * What the board draws once lanes are collapsed, and the routing problems for its lines: lines inside a lane are
+ * always drawn; links between lanes (and to and from the entry screens) only for the screen in focus.
+ */
 export interface BoardPlan {
   board: Board;
   lines: BoardEdge[];
+  links: BoardEdge[];
   laneX: number;
-  /** Collapsed lanes' rows, by lane node id: lines into and out of a collapsed lane end there. */
+  /** Collapsed lanes' rows, by lane node id: links into and out of a collapsed lane end there. */
   rows: Map<string, Rect & { screens: number }>;
   input: RouteInput;
+  linksInput: RouteInput;
 }
 
 const labelOf = (line: BoardEdge) => (line.count > 1 ? `×${line.count}` : line.edge.label);
 
 export function planBoard(flow: Flow, layout: Layout, opts: ReactFlowOptions = {}): BoardPlan {
   const measure = opts.measure ?? estimate;
-  const entryRight = Math.max(0, ...flow.screens.filter((s) => !s.lane).map((s) => layout.screens[s.id].x + layout.screens[s.id].w));
-  const laneX = Math.max(LANE_X, entryRight + 10);
+  const laneX = LANE_X;
   const board = collapseLanes(flow, layout, opts.collapsed ?? new Set());
-  const lines = boardEdges(flow, board);
+  const all = boardEdges(flow, board);
+  const lines = all.filter((l) => inLane(flow, l.edge));
+  const links = all.filter((l) => !inLane(flow, l.edge));
   const rows: BoardPlan["rows"] = new Map();
   for (const lane of flow.lanes) {
     if (!board.collapsed.has(lane.id)) continue;
@@ -123,11 +148,45 @@ export function planBoard(flow: Flow, layout: Layout, opts: ReactFlowOptions = {
     const screens = flow.screens.filter((s) => s.lane === lane.id).length;
     const summary = opts.laneSummary?.(screens) ?? String(screens);
     const w = ROW_CHROME + measure(lane.title, { size: 18, weight: 500 }) + measure(summary, { size: 13, weight: 400 });
-    // Where an expanded lane's title starts (LaneNodeView), clear of the entry screens beside the lanes.
+    // Where an expanded lane's title starts (LaneNodeView).
     const x0 = laneX + ROW_INSET;
     rows.set(laneNodeId(lane.id), { x0, y0: box.y, x1: x0 + Math.ceil(w), y1: box.y + box.height, screens });
   }
-  return { board, lines, laneX, rows, input: routeInput(flow, board, lines, laneX, rows, measure, opts.enterAny) };
+  return {
+    board,
+    lines,
+    links,
+    laneX,
+    rows,
+    input: routeInput(flow, board, lines, laneX, rows, measure, opts.enterAny),
+    linksInput: routeInput(flow, board, links, laneX, rows, measure, opts.enterAny),
+  };
+}
+
+/** Both ends in the same lane, or both in none (the entry row). */
+export function inLane(flow: Flow, e: Edge): boolean {
+  const lane = (id: string) => flow.screens.find((s) => s.id === id)?.lane ?? "";
+  return lane(e.from) === lane(e.to);
+}
+
+/** For each screen, the screens in other lanes it leads to and comes from, one each, in the order of the edges. */
+export function linkEnds(flow: Flow): Map<string, { out: LinkEnd[]; into: LinkEnd[] }> {
+  const byId = new Map(flow.screens.map((s) => [s.id, s]));
+  const ends = new Map(flow.screens.map((s) => [s.id, { out: [] as LinkEnd[], into: [] as LinkEnd[] }]));
+  const endOf = (id: string, label?: string): LinkEnd | undefined => {
+    const s = byId.get(id);
+    return s && { id, title: s.title, ...(label ? { label } : {}), tone: laneOf(flow, id)?.tone ?? "neutral" };
+  };
+  for (const e of flow.edges) {
+    if (inLane(flow, e)) continue;
+    const from = ends.get(e.from);
+    const to = ends.get(e.to);
+    const target = endOf(e.to, e.label);
+    const source = endOf(e.from, e.label);
+    if (from && target && !from.out.some((x) => x.id === e.to)) from.out.push(target);
+    if (to && source && !to.into.some((x) => x.id === e.from)) to.into.push(source);
+  }
+  return ends;
 }
 
 /** Lines go around the frames, lane titles and lane notes, and into collapsed lanes' rows; see route.ts. */
@@ -143,13 +202,13 @@ function routeInput(flow: Flow, board: Board, lines: BoardEdge[], laneX: number,
     const frame = { x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1 };
     screens.push({ id, frame, block: frame });
   }
-  // Where LaneNodeView draws them: the title (18px, px-2.5) at -top-3.5 left-6, the note (13px) at bottom-3 left-6.
+  // Where LaneNodeView draws them: the title (18px, px-2.5) on the top edge at left-6, the note (13px) at bottom-3 left-6.
   const obstacles: Rect[] = [];
   for (const lane of flow.lanes) {
     const box = layout.lanes.find((l) => l.id === lane.id);
     if (!box || board.collapsed.has(lane.id)) continue;
     const extra = lane.enter === "any" && enterAny ? 12 + measure(enterAny, { size: 12, weight: 400 }) : 0;
-    obstacles.push({ x0: laneX + 24, y0: box.y - 14, x1: laneX + 24 + 20 + LANE_TITLE_BUTTONS + measure(lane.title, { size: 18, weight: 500 }) + extra, y1: box.y + 14 });
+    obstacles.push({ x0: laneX + 24, y0: box.y - LANE_TITLE_OVERHANG, x1: laneX + 24 + 20 + LANE_TITLE_BUTTONS + measure(lane.title, { size: 18, weight: 500 }) + extra, y1: box.y + 6 });
     if (lane.note)
       obstacles.push({ x0: laneX + 24, y0: box.y + box.height - 32, x1: laneX + 24 + measure(lane.note, { size: 13, weight: 400 }), y1: box.y + box.height - 12 });
   }
@@ -187,6 +246,7 @@ export function toReactFlow(
 ): { nodes: FlowNode[]; edges: FlowEdge[]; plan: BoardPlan } {
   const plan = opts.plan ?? planBoard(flow, layout, opts);
   const { board, lines, laneX, rows } = plan;
+  const ends = linkEnds(flow);
   const shown = board.layout;
   // Titles grow to stay readable when zoomed out, up to half the way to the next title above or below:
   // an expanded lane's sits on its top edge, a collapsed lane's row in its middle.
@@ -235,7 +295,18 @@ export function toReactFlow(
           id: screen.id,
           type: "screen",
           position: { x: box.x, y: box.y },
-          data: { screen, tone: laneOf(flow, screen.id)?.tone ?? "neutral", pinned: box.pinned, flow, width: box.w, height: box.h, commenting: false, live: false },
+          data: {
+            screen,
+            tone: laneOf(flow, screen.id)?.tone ?? "neutral",
+            pinned: box.pinned,
+            flow,
+            width: box.w,
+            height: box.h,
+            commenting: false,
+            live: false,
+            out: ends.get(screen.id)?.out ?? [],
+            into: ends.get(screen.id)?.into ?? [],
+          },
           width: box.w,
           height: box.h,
           style: { width: box.w, height: box.h },
@@ -243,34 +314,51 @@ export function toReactFlow(
       }),
   ];
   const routes = opts.routes ?? routeEdges(plan.input);
+  return { nodes, edges: lines.map((line, n) => toEdge(flow, plan, line, routes[n])), plan };
+}
+
+/**
+ * The links between lanes that touch one screen, as lines for when it is in focus, with their routes when the
+ * canvas has them (routed together, from plan.linksInput).
+ */
+export function focusEdges(flow: Flow, plan: BoardPlan, routes: (Routed | undefined)[] | undefined, screen: string): FlowEdge[] {
+  return plan.links.flatMap((line, n) => (line.from === screen || line.to === screen ? [toEdge(flow, plan, line, routes?.[n], true)] : []));
+}
+
+function toEdge(flow: Flow, plan: BoardPlan, line: BoardEdge, r: Routed | undefined, link = false): FlowEdge {
+  const e = line.edge;
   const boxOf = (id: string) => {
-    const r = rows.get(id);
-    return r ? { x: r.x0, y: r.y0, w: r.x1 - r.x0, h: r.y1 - r.y0 } : shown.screens[id];
+    const row = plan.rows.get(id);
+    return row ? { x: row.x0, y: row.y0, w: row.x1 - row.x0, h: row.y1 - row.y0 } : plan.board.layout.screens[id];
   };
-  const edges: FlowEdge[] = lines.map((line, n) => {
-    const e = line.edge;
-    const a = boxOf(line.from);
-    const b = boxOf(line.to);
-    const r = routes[n];
-    const [out, into] = r?.sides ?? (b.x + b.w <= a.x ? ["left", "right"] : ["right", "left"]);
-    const route: EdgeRoute | undefined = r && {
-      d: roundedPath(r.points),
-      label: r.label,
-      ends: { sx: out === "right" ? a.x + a.w : a.x, sy: a.y + a.h / 2, tx: into === "right" ? b.x + b.w : b.x, ty: b.y + b.h / 2 },
-    };
-    const folded = line.from !== e.from || line.to !== e.to;
-    const first = flow.edges.findIndex((x) => x.from === e.from && x.to === e.to) === line.index;
-    return {
-      id: folded ? `${line.from}->${line.to}` : first ? `${e.from}->${e.to}` : `${e.from}->${e.to}#${line.index}`,
-      type: "flow",
-      source: line.from,
-      target: line.to,
-      sourceHandle: out === "left" ? "out-left" : "out-right",
-      targetHandle: into === "left" ? "in-left" : "in-right",
-      data: { label: labelOf(line), tone: toneOfEdge(flow, e), dashed: e.kind === "back", edge: e, index: line.index, route, ...(folded ? { folded } : {}) },
-    };
-  });
-  return { nodes, edges, plan };
+  const a = boxOf(line.from);
+  const b = boxOf(line.to);
+  const [out, into] = r?.sides ?? (b.x + b.w <= a.x ? ["left", "right"] : ["right", "left"]);
+  const route: EdgeRoute | undefined = r && {
+    d: roundedPath(r.points),
+    label: r.label,
+    ends: { sx: out === "right" ? a.x + a.w : a.x, sy: a.y + a.h / 2, tx: into === "right" ? b.x + b.w : b.x, ty: b.y + b.h / 2 },
+  };
+  const folded = line.from !== e.from || line.to !== e.to;
+  const first = flow.edges.findIndex((x) => x.from === e.from && x.to === e.to) === line.index;
+  return {
+    id: folded ? `${line.from}->${line.to}` : first ? `${e.from}->${e.to}` : `${e.from}->${e.to}#${line.index}`,
+    type: "flow",
+    source: line.from,
+    target: line.to,
+    sourceHandle: out === "left" ? "out-left" : "out-right",
+    targetHandle: into === "left" ? "in-left" : "in-right",
+    data: {
+      label: labelOf(line),
+      tone: toneOfEdge(flow, e),
+      dashed: e.kind === "back",
+      edge: e,
+      index: line.index,
+      route,
+      ...(folded ? { folded } : {}),
+      ...(link ? { link } : {}),
+    },
+  };
 }
 
 export type LegendItem = { kind: "lane"; tone: Tone; label: string } | { kind: "badge"; badge: Badge };
@@ -284,4 +372,4 @@ export function legendOf(flow: Flow): LegendItem[] {
   ];
 }
 
-export { FRAME_H, FRAME_W, LABEL_H, NOTE_H };
+export { FRAME_H, FRAME_W, LABEL_H, LANE_X, NOTE_H };

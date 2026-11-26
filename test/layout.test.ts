@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseFlow, type Flow } from "../src/core/flow.ts";
-import { FRAME_H, FRAME_W, layoutFlow, type Layout } from "../src/core/layout.ts";
+import { FRAME_H, FRAME_W, LANE_X, layoutFlow, NOTE_H, type Layout } from "../src/core/layout.ts";
 
 function flowOf(yaml: string): Flow {
   const { flow, issues } = parseFlow(yaml, "t");
@@ -48,10 +48,25 @@ edges:
 `;
 
 describe("layoutFlow", () => {
-  it("assigns columns along the flow, entry in column 0", async () => {
+  it("lays each lane out from its own start, along its own edges", async () => {
     const l = await layoutFlow(flowOf(base));
-    expect([l.screens.H.col, l.screens.A1.col, l.screens.A2.col, l.screens.A3.col]).toEqual([0, 1, 2, 3]);
+    expect([l.screens.A1.col, l.screens.A2.col, l.screens.A3.col]).toEqual([0, 1, 2]);
     expect(l.screens.A1.x).toBeLessThan(l.screens.A2.x);
+    // Every lane starts at the same place, whatever leads into it.
+    expect(l.screens.B1.x).toBe(l.screens.A1.x);
+    expect(l.screens.X1.x).toBe(l.screens.A1.x);
+  });
+
+  it("wraps a step of more than three screens into the next column", async () => {
+    const more = ["B2c", "B2d", "B2e"];
+    const text = base
+      .replace("  - { id: B2b, title: B2b, lane: b }\n", `  - { id: B2b, title: B2b, lane: b }\n${more.map((id) => `  - { id: ${id}, title: ${id}, lane: b }\n`).join("")}`)
+      .replace("  - { from: B1, to: B2b }\n", `  - { from: B1, to: B2b }\n${more.map((id) => `  - { from: B1, to: ${id} }\n`).join("")}`);
+    const l = await layoutFlow(flowOf(text));
+    expect(["B1", "B2a", "B2b", ...more].map((id) => l.screens[id].col)).toEqual([0, 1, 1, 1, 2, 2]);
+    expect(overlaps(l)).toEqual([]);
+    const lane = l.lanes.find((x) => x.id === "b")!;
+    expect(lane.height).toBeLessThan(4 * (FRAME_H + 90));
   });
 
   it("stacks branches of one lane in one column without overlap", async () => {
@@ -73,17 +88,15 @@ describe("layoutFlow", () => {
     }
   });
 
-  it("centres the lane-less entry vertically across the lanes", async () => {
+  it("puts lane-less screens in a row above the lanes", async () => {
     const l = await layoutFlow(flowOf(base));
-    const top = l.lanes[0].y;
-    const bottom = l.lanes.at(-1)!.y + l.lanes.at(-1)!.height;
-    const mid = l.screens.H.y + l.screens.H.h / 2;
-    expect(Math.abs(mid - (top + bottom) / 2)).toBeLessThan(2);
+    expect(l.screens.H.y + l.screens.H.h + NOTE_H).toBeLessThanOrEqual(l.lanes[0].y);
+    expect(l.screens.H.x).toBe(l.screens.A1.x);
   });
 
-  it("tiles an enter:any lane from column 1 in screen order", async () => {
+  it("tiles an enter:any lane in screen order", async () => {
     const l = await layoutFlow(flowOf(base));
-    expect([l.screens.X1.col, l.screens.X2.col]).toEqual([1, 2]);
+    expect([l.screens.X1.col, l.screens.X2.col]).toEqual([0, 1]);
     expect(l.screens.X1.y).toBe(l.screens.X2.y);
   });
 
@@ -109,7 +122,7 @@ describe("layoutFlow", () => {
 });
 
 describe("layoutFlow lane bounds", () => {
-  it("keeps every lane screen right of the entry column", async () => {
+  it("starts a lane's screens past where the lane begins, leaving room for lines into its first column", async () => {
     const f = flowOf(`version: 1
 title: T
 lanes:
@@ -124,8 +137,9 @@ edges:
   - { from: X1, to: H, kind: back }
 `);
     const l = await layoutFlow(f);
-    expect(l.screens.M1.col).toBe(1);
-    expect(l.screens.M1.x).toBeGreaterThanOrEqual(l.screens.H.x + FRAME_W + 40);
+    expect(l.screens.M1.col).toBe(0);
+    expect(l.screens.M1.x).toBeGreaterThanOrEqual(LANE_X + 100);
+    expect(l.width).toBeGreaterThanOrEqual(l.screens.M1.x + FRAME_W);
   });
 
   it("starts lanes below the canvas top with room for the lane title", async () => {
@@ -138,13 +152,22 @@ describe("layoutFlow cycles", () => {
   it("keeps the flow left to right when a normal edge returns home", async () => {
     const text = base.replace("  - { from: A3, to: H, kind: back }\n", "  - { from: A3, to: H, label: Done }\n  - { from: B2a, to: H, label: Done }\n");
     const l = await layoutFlow(flowOf(text));
-    expect([l.screens.H.col, l.screens.A1.col, l.screens.A2.col, l.screens.A3.col]).toEqual([0, 1, 2, 3]);
-    expect([l.screens.B1.col, l.screens.B2a.col]).toEqual([1, 2]);
+    expect([l.screens.A1.col, l.screens.A2.col, l.screens.A3.col]).toEqual([0, 1, 2]);
+    expect([l.screens.B1.col, l.screens.B2a.col]).toEqual([0, 1]);
   });
 
   it("orders a cycle between lane screens from where the flow enters it", async () => {
     const text = base.replace("  - { from: A3, to: H, kind: back }\n", "  - { from: A3, to: A1, label: Again }\n");
     const l = await layoutFlow(flowOf(text));
-    expect([l.screens.A1.col, l.screens.A2.col, l.screens.A3.col]).toEqual([1, 2, 3]);
+    expect([l.screens.A1.col, l.screens.A2.col, l.screens.A3.col]).toEqual([0, 1, 2]);
+  });
+
+  it("reads a cycle from the screen the flow comes into the lane at, not the first one listed", async () => {
+    const text = base.replace(
+      "  - { from: H, to: A1 }\n  - { from: A1, to: A2 }\n  - { from: A2, to: A3 }\n  - { from: A3, to: H, kind: back }\n",
+      "  - { from: H, to: A2 }\n  - { from: A2, to: A3 }\n  - { from: A3, to: A1 }\n  - { from: A1, to: A2, label: Again }\n",
+    );
+    const l = await layoutFlow(flowOf(text));
+    expect([l.screens.A2.col, l.screens.A3.col, l.screens.A1.col]).toEqual([0, 1, 2]);
   });
 });
