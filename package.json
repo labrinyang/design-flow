@@ -47,10 +47,16 @@
     "vitest": "^5.1.1"
   },
   "license": "MIT",
-  "author": "Steven Lynn <i@stv.pm>",
+  "author": "OneKey (https://onekey.so)",
+  "contributors": [
+    {
+      "name": "Steven Lynn",
+      "url": "https://github.com/stvlynn"
+    }
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/stvlynn/design-flow.git"
+    "url": "https://github.com/labrinyang/design-flow.git"
   },
-  "homepage": "https://github.com/stvlynn/design-flow"
+  "homepage": "https://github.com/labrinyang/design-flow"
 }

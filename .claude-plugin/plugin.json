@@ -4,11 +4,11 @@
   "version": "0.1.0",
   "license": "MIT",
   "author": {
-    "name": "Steven Lynn",
-    "email": "i@stv.pm"
+    "name": "OneKey",
+    "url": "https://onekey.so"
   },
-  "homepage": "https://github.com/stvlynn/design-flow",
-  "repository": "https://github.com/stvlynn/design-flow",
+  "homepage": "https://github.com/labrinyang/design-flow",
+  "repository": "https://github.com/labrinyang/design-flow",
   "keywords": [
     "ux",
     "flow",
