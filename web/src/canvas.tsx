@@ -211,6 +211,10 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     );
   }, [project, feature]);
   const fitted = useRef(false);
+  /** The link the page opened with, read before a settled view can rewrite the address with its own screen. */
+  const [startLink] = useState(() => parseLink(location.hash));
+  /** The view writes the address only once the first view has followed the link the page opened with. */
+  const linkReady = useRef(false);
   const [located, setLocated] = useState<Map<string, Located>>(() => new Map());
   const [pulse, setPulse] = useState<{ id: string; n: number }>();
   const [searchOpen, setSearchOpen] = useState(false);
@@ -430,7 +434,8 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
       fitted.current = true;
       requestAnimationFrame(() => {
         openToWindow();
-        followLink(parseLink(location.hash));
+        followLink(startLink);
+        linkReady.current = true;
       });
     }
     // followLink reads the state as it is then.
@@ -560,7 +565,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
    */
   const onSettle = useCallback(
     (v: { x: number; y: number; zoom: number }, view: DOMRect) => {
-      if (linkThread.current || !flow || !board) return;
+      if (!linkReady.current || linkThread.current || !flow || !board) return;
       const insets = fitInsets(view);
       const c = {
         x: (insets.left + (view.width - insets.left - insets.right) / 2 - v.x) / v.zoom,
@@ -783,10 +788,13 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
         : [];
     const b = exportBounds([nodeBoxes, ...pins], 48);
     const bg = getComputedStyle(document.documentElement).getPropertyValue("--canvas");
-    // The picture is drawn at 100%, so pins and outlines take their 100% size there whatever the zoom on screen.
+    // The picture is drawn at 100%, so it looks as the canvas does at 100% whatever the zoom on screen: pins,
+    // outlines, labels and lane titles at their own size, labels whole with their link chips, and line labels shown.
     const root = viewport.closest<HTMLElement>(".react-flow");
-    const scales = (["--df-chrome", "--df-pin"] as const).map((k) => [k, root?.style.getPropertyValue(k) ?? ""] as const);
+    const scales = (["--df-chrome", "--df-pin", "--df-label", "--df-lane"] as const).map((k) => [k, root?.style.getPropertyValue(k) ?? ""] as const);
+    const flags = (["data-compact", "data-no-edge-labels"] as const).map((k) => [k, root?.hasAttribute(k) ?? false] as const);
     for (const [k] of scales) root?.style.setProperty(k, "1");
+    for (const [k] of flags) root?.removeAttribute(k);
     // Sandboxed frames cannot be read from outside: ask each for its markup and put a picture in its place.
     const restore = await swapFramesForSnapshots(viewport);
     let url: string;
@@ -802,6 +810,7 @@ function CanvasInner({ project, feature }: { project: string; feature: string })
     } finally {
       restore();
       for (const [k, v] of scales) root?.style.setProperty(k, v);
+      for (const [k, on] of flags) root?.toggleAttribute(k, on);
     }
     const a = document.createElement("a");
     a.href = url;
